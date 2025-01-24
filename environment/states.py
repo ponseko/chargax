@@ -1,12 +1,13 @@
 import chex
 from typing import Union, List
 import jax.numpy as jnp
+import jax
 import equinox as eqx
 
 @chex.dataclass(frozen=True)
 class Chargers:
     # Car variables
-    car_rate_max: chex.Array
+    car_rate_max: chex.Array 
     time_waiting: chex.Array
     time_charging: chex.Array
     time_till_leave: chex.Array
@@ -20,7 +21,7 @@ class Chargers:
     # charger_rate_max: float # MAX RATE IS DEFINED BY THE GROUP 
 
     @property
-    def number_of_chargers(self) -> int:
+    def num_chargers(self) -> int:
         return len(self.car_rate_max)
 
     @property
@@ -28,7 +29,7 @@ class Chargers:
         return jnp.array([self.battery_level, self.battery_capacity, self.battery_temperature])
 
     @classmethod
-    def instantiate(cls, num_chargers: int):
+    def init_empty(cls, num_chargers: int):
         return cls(
             car_rate_max=jnp.zeros(num_chargers),
             time_waiting=jnp.zeros(num_chargers, dtype=int),
@@ -40,7 +41,24 @@ class Chargers:
             charger_rate_current=jnp.zeros(num_chargers),
             car_connected=jnp.zeros(num_chargers, dtype=bool)
         )
-
+    
+    @classmethod
+    def init_custom(cls, num_chargers: int, key: chex.PRNGKey):
+        keys = jax.random.split(key, 5)
+        departure_times = jax.random.randint(keys[0], (num_chargers,), 10, 60)
+        arrival_battery_levels = jax.random.uniform(keys[1], (num_chargers,), minval=3., maxval=50.)
+        car_battery_capacitys = jax.random.uniform(keys[2], (num_chargers,), minval=200., maxval=300.)
+        return cls(
+            car_rate_max=jnp.full(num_chargers, 75.0),
+            time_waiting=jnp.zeros(num_chargers, dtype=int),
+            time_charging=jnp.zeros(num_chargers, dtype=int),
+            time_till_leave=departure_times,
+            battery_level=arrival_battery_levels,
+            battery_capacity=car_battery_capacitys,
+            battery_temperature=jnp.full(num_chargers, 35.0),
+            charger_rate_current=jnp.zeros(num_chargers),
+            car_connected=jnp.zeros(num_chargers, dtype=bool)
+        )
     
 class ChargerGroup(eqx.Module):
     """
@@ -52,10 +70,21 @@ class ChargerGroup(eqx.Module):
     connections: List[Union[int, 'ChargerGroup']]
 
     def group_capacity_current(self, chargers: Chargers) -> float:
+        return jnp.sum(chargers.charger_rate_current[self.charger_idx_in_group])
         if isinstance(self.connections[0], ChargerGroup): # Chargers
             return jnp.sum(jnp.array([group.group_capacity_current(chargers) for group in self.connections]))
         else:
             return jnp.sum(chargers.charger_rate_current[self.connections[0]])
+    
+    @property
+    def charger_idx_in_group(self) -> chex.Array:
+        return jnp.concatenate(
+            jax.tree.leaves(self.connections)
+        )
+    
+    @property
+    def number_of_chargers_in_group(self) -> int:
+        return len(self.charger_idx_in_group)
             
     
 
@@ -93,5 +122,5 @@ class ChargerGroup(eqx.Module):
 
 @chex.dataclass(frozen=True)
 class EnvState:
-    grid_connection: ChargerGroup
+    chargers: Chargers
     timestep: int = 0

@@ -17,7 +17,6 @@ from environment.states import EnvState, ChargerGroup, Chargers
 class Chargax(JaxBaseEnv):
 
     charger_topology: ChargerGroup
-    chargers: Chargers
     arrival_distributions: List[distrax.Distribution]
 
     def __post_init__(self):
@@ -30,10 +29,11 @@ class Chargax(JaxBaseEnv):
 
     def reset_env(self, key: chex.PRNGKey) -> Tuple[Dict[str, chex.Array], EnvState]:
         state = EnvState(
-            grid_connection=self.charger_topology,
+            chargers=Chargers.init_empty(self.charger_topology.number_of_chargers_in_group),
         )
         observation = self.get_observations(state)
         return observation, state
+    
     @jax.jit
     def step_env(self, rng: chex.PRNGKey, state: EnvState, actions: Dict[str, chex.Array]) -> Tuple[TimeStep, EnvState]:
 
@@ -51,121 +51,58 @@ class Chargax(JaxBaseEnv):
         )
 
         new_state = EnvState(
-            grid_connection=new_state.grid_connection,
+            chargers=new_state.chargers,
             timestep=state.timestep + 1
         )
     
         return timestep_object, new_state
     
-    @jax.jit
     def clear_out_current_cars(self, state: EnvState) -> EnvState:
 
-        breakpoint()
-        time_till_leaves = jnp.array(
-            jax.tree.map(lambda x: x.car.time_till_leave, state.grid_connection.chargers_in_group, is_leaf=lambda x: isinstance(x, ChargerState))
+        car_waiting_times = state.chargers.time_till_leave - 5
+        car_waiting_times = jnp.maximum(car_waiting_times, 0)
+        car_connected = (car_waiting_times * state.chargers.car_connected).astype(bool)
+        chargers = replace(
+            state.chargers,
+            time_till_leave=car_waiting_times,
+            car_connected=car_connected,
+            car_rate_max=state.chargers.car_rate_max * car_connected
         )
-        time_till_leaves = jnp.maximum(time_till_leaves - 5, 0)
-        # create an array filled with F
-
-        # Put back in original position:
-        charging_stations = jax.tree.map(
-            lambda charger, ttl: replace(
-                charger, car=replace(
-                    charger.car, time_till_leave=ttl
-                )
-            ),
-            state.grid_connection.chargers_in_group,
-            time_till_leaves,
-            is_leaf=lambda x: isinstance(x, ChargerState)
-        )
-
-
-
-        # charging_stations = jax.tree.map(
-        #     lambda charger: replace(
-        #         charger, car=replace(
-        #             charger.car, 
-        #             time_till_leave=jnp.maximum(charger.car.time_till_leave - 5, 0)
-        #         )
-        #     ),
-        #     state.grid_connection,
-        #     is_leaf=lambda x: isinstance(x, ChargerState)
-        # )
-
-        return replace(state, grid_connection=charging_stations)
+        return replace(state, chargers=chargers)
     
-    @jax.jit
     def add_new_cars(self, state: EnvState, key: chex.PRNGKey) -> EnvState:
 
-        # We need some trickery here to remain compatible with Jit and Vmap
-
-        def sample_car(key: chex.PRNGKey) -> CarState:
-            keys = jax.random.split(key, 5)
-            departure_time = jax.random.randint(keys[0], (), 10, 60)
-            arrival_battery_level = jax.random.uniform(keys[1], (), minval=3., maxval=50.)
-            car_battery_capacity = jax.random.uniform(keys[2], (), minval=200., maxval=300.)
-            return CarState(
-                time_till_leave=departure_time,
-                battery_level=arrival_battery_level,
-                battery_capacity=car_battery_capacity,
-                battery_temperature=35.0,
-                car_rate_max=75.0
-            )
-        
         # TODO: Can't index with a tracer into a list; 
         # Some inefficient trick with a lax.switch exists, but we'll need something better
         new_cars_amount = self.arrival_distributions[0].sample(seed=key)
         new_cars_amount = jnp.maximum(new_cars_amount, 1).astype(int) # Tmp: at least one car
-        
-        # First create a boolean lists indicating where the new arriving cars should be placed
-        # This sets the index to False when a car is already connected
-        # Or when car is not arriving (we only set new_cars_amount of True values)
-        # Cars will just take the first available spot 
-        not_connected_chargers = jax.tree.map(
-            lambda x: jnp.logical_not(x.car_connected),
-            state.grid_connection.chargers_in_group,
-            is_leaf=lambda x: isinstance(x, ChargerState)
-        )
-        not_connected_chargers = jnp.array(not_connected_chargers)
+
+        # Generate new chargers and put the car_connected to False when:
+        # 1. The index of the charger is already connected to a car
+        # 2. There are less incoming cars than chargers
+        state.chargers.car_connected
+        not_connected_chargers = jnp.logical_not(state.chargers.car_connected)
         sort_order = jnp.argsort(not_connected_chargers, descending=True)
-        required_chargers = jnp.arange(state.grid_connection.number_of_chargers_in_group) < new_cars_amount
-        required_chargers = jnp.zeros_like(required_chargers).at[sort_order].set(required_chargers)
-        required_chargers = [c for c in required_chargers]
-
-        
-        # Sample a car for every possible charging spot (even if it's not needed -- to stay compatible with vmap)
-        # And set car_connected to False if the spot is not needed based on the previously created required_chargers
-        new_car_keys = jax.random.split(key, state.grid_connection.number_of_chargers_in_group)
-        new_chargers = [
-            ChargerState(
-                charger_rate_current=charger.charger_rate_current,
-                car_connected=True,
-                car=sample_car(new_car_keys[i])
-            ) for i, charger in enumerate(state.grid_connection.chargers_in_group)
-        ]
-        new_chargers = jax.tree.map(
-            lambda x, y: ChargerState(
-                charger_rate_current=x.charger_rate_current,
-                car_connected=y,
-                car=x.car
-            ),
-            new_chargers,
-            required_chargers,
-            is_leaf=lambda x: isinstance(x, ChargerState)
+        required_chargers = jnp.arange(state.chargers.num_chargers) < new_cars_amount
+        required_chargers_in_order = jnp.zeros_like(required_chargers).at[sort_order].set(required_chargers)
+        incoming_chargers = Chargers.init_custom(
+            len(self.charger_topology.charger_idx_in_group),
+            key
+        )
+        incoming_chargers = replace(
+            incoming_chargers, 
+            car_connected=required_chargers_in_order,
+            car_rate_max=incoming_chargers.car_rate_max * required_chargers_in_order
         )
 
-        # Now merge the two lists of charging stations (and cars) together
-        grid_connection_leaves, treedef = jax.tree_flatten(state.grid_connection, is_leaf=lambda x: isinstance(x, ChargerState))
-        updated_chargers = jax.tree_map(
-            lambda x, y: jax.lax.cond(
-                x.car_connected, lambda: x, lambda: y
-            ), grid_connection_leaves, new_chargers, is_leaf=lambda x: isinstance(x, ChargerState)
+        # Merge the incoming chargers with the current chargers
+        merged_chargers = jax.tree_map(
+            lambda new, curr: jax.lax.select(
+                required_chargers_in_order, new, curr
+            ), incoming_chargers, state.chargers
         )
 
-        # Unflatten back to original pytree structure
-        updated_chargers = treedef.unflatten(updated_chargers)
-
-        return  replace(state, grid_connection=updated_chargers)
+        return replace(state, chargers=merged_chargers)
 
     def get_observations(self, state: EnvState) -> Dict[str, chex.Array]:
         return jnp.array([0,0])
