@@ -1,0 +1,57 @@
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+import chex
+from functools import partial
+import distrax
+
+from environment.chargax import Chargax
+
+@chex.dataclass(frozen=True)
+class TrainerParams:
+    rng: int = 42
+    num_envs: int = 4
+    total_timesteps: int = 10000
+
+def build_random_trainer(
+        env: Chargax,
+        params: TrainerParams = TrainerParams()
+):
+    env = env
+    params = params
+    rng = jax.random.PRNGKey(params.rng)
+
+    rng, reset = jax.random.split(rng)
+    obs_v, env_state_v = jax.vmap(env.reset)(jax.random.split(reset, params.num_envs))
+
+    def train_function(rng: chex.PRNGKey = rng):
+
+        def env_step(runner_state, _):
+            rng, obs_v, env_state_v = runner_state
+
+            rng, action_key, step_key = jax.random.split(rng, 3)
+            action_v = jax.vmap(
+                env.action_space.sample
+            )(jax.random.split(action_key, params.num_envs))
+
+            (obs_v, reward, terminated, truncated, info), env_state_v = jax.vmap(
+                env.step
+            )(
+                jax.random.split(step_key, params.num_envs),
+                env_state_v,
+                action_v
+            )
+
+            return (rng, obs_v, env_state_v), reward
+
+        initial_runner_state = (rng, obs_v, env_state_v)
+        trained_runner_state, train_rewards = jax.lax.scan(
+            env_step,
+            initial_runner_state,
+            None,
+            length=params.total_timesteps,
+        )
+
+        return trained_runner_state, train_rewards
+
+    return train_function
