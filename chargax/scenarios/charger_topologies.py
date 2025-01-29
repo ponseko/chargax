@@ -1,4 +1,4 @@
-from environment import EnvState, Chargers, ChargerGroup
+from chargax import EnvState, Chargers, ChargerGroup
 import equinox as eqx
 import numpy as np
 

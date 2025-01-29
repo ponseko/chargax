@@ -5,8 +5,7 @@ import chex
 from functools import partial
 import distrax
 
-from environment.chargax import Chargax
-from environment.base_and_wrappers import LogWrapper
+from chargax import Chargax, LogWrapper
 
 @chex.dataclass(frozen=True)
 class TrainerParams:

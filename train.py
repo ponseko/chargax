@@ -1,9 +1,11 @@
-from algorithms.random import build_random_trainer
-from environment import Chargax
-from scenarios.charger_topologies import create_uniform_topology
-from scenarios.ev_arivals import interpolate_arrival_data
-from scenarios.scenario_data import office_distribution_means
-from util.helpers import pretty_print_charger_group
+from chargax import (
+    Chargax,
+    create_uniform_topology,
+    interpolate_arrival_data,
+    office_distribution_means,
+    pretty_print_charger_group,
+    build_random_trainer
+)
 
 import jax 
 import jax.numpy as jnp

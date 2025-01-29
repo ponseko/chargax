@@ -2,7 +2,7 @@ import distrax
 import jax
 import numpy as np
 
-from scenarios.scenario_data import office_distribution_means
+from chargax import office_distribution_means
 
 def interpolate_arrival_data(mean_data, timestep_interval_minutes, total_simulation_days, std_window_size=10):
     total_timesteps = int(24*60*total_simulation_days // timestep_interval_minutes)

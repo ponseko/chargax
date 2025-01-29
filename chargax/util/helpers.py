@@ -1,4 +1,4 @@
-from environment import EnvState, ChargerGroup, Chargers
+from chargax import EnvState, ChargerGroup, Chargers
 
 def pretty_print_charger_group(group: ChargerGroup, chargers: Chargers, indent=0, is_last=True, prefix=""):
     indent_str = ' ' * indent

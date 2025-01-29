@@ -7,9 +7,7 @@ from dataclasses import replace, asdict
 import chex
 import distrax
 
-from environment.base_and_wrappers import JaxBaseEnv, TimeStep
-from environment.states import EnvState, ChargerGroup, Chargers
-from environment.spaces import Discrete, MultiDiscrete
+from chargax import JaxBaseEnv, TimeStep, EnvState, ChargerGroup, Chargers, Discrete, MultiDiscrete
 
 # disable jit
 # jax.config.update("jax_disable_jit", True)
