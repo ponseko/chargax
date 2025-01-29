@@ -99,11 +99,10 @@ class LogEnvState:
 class LogWrapper(JaxEnvWrapper):
     def reset(self, key: chex.PRNGKey) -> Tuple[chex.Array, LogEnvState]:
         obs, env_state = self._env.reset(key)
-        num_agents = self._env.num_agents
         state = LogEnvState(
             env_state=env_state,
-            episode_returns=jnp.zeros(num_agents),
-            returned_episode_returns=jnp.zeros(num_agents),
+            episode_returns=0.,
+            returned_episode_returns=0.,
             timestep=0,
         )
         return obs, state
@@ -117,10 +116,8 @@ class LogWrapper(JaxEnvWrapper):
         (obs, reward, terminated, truncated, info), env_state = self._env.step(
             key, state.env_state, action
         )
-        ep_rewards = jax.tree.leaves(reward)
-        ep_rewards = jnp.concatenate([ep_rewards[1], jnp.expand_dims(ep_rewards[0], axis=-1)])
-        done = jnp.any(jnp.logical_or(terminated["population"], truncated["population"]))
-        new_episode_return = state.episode_returns + ep_rewards
+        done = jnp.logical_or(terminated, truncated)
+        new_episode_return = state.episode_returns + reward
         state = LogEnvState(
             env_state=env_state,
             episode_returns=new_episode_return * (1 - done),

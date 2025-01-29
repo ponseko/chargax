@@ -6,6 +6,7 @@ from functools import partial
 import distrax
 
 from environment.chargax import Chargax
+from environment.base_and_wrappers import LogWrapper
 
 @chex.dataclass(frozen=True)
 class TrainerParams:
@@ -18,6 +19,7 @@ def build_random_trainer(
         params: TrainerParams = TrainerParams()
 ):
     env = env
+    env = LogWrapper(env)
     params = params
     rng = jax.random.PRNGKey(params.rng)
 
@@ -42,16 +44,16 @@ def build_random_trainer(
                 action_v
             )
 
-            return (rng, obs_v, env_state_v), reward
+            return (rng, obs_v, env_state_v), info
 
         initial_runner_state = (rng, obs_v, env_state_v)
-        trained_runner_state, train_rewards = jax.lax.scan(
+        trained_runner_state, train_metrics = jax.lax.scan(
             env_step,
             initial_runner_state,
             None,
             length=params.total_timesteps,
         )
 
-        return trained_runner_state, train_rewards
+        return trained_runner_state, train_metrics
 
     return train_function

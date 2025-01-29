@@ -19,6 +19,8 @@ class Chargax(JaxBaseEnv):
     charger_topology: ChargerGroup
     arrival_distributions: List[distrax.Distribution]
     num_discretization_levels: int = 20 # 10 would mean each charger can charge 10%, 20%, ... of its max rate
+    minutes_per_timestep: int = 5
+    renormalize_power_levels: bool = True
 
     def __post_init__(self):
         # self.__setattr__("some_property", some_property_value)
@@ -33,6 +35,7 @@ class Chargax(JaxBaseEnv):
             chargers=Chargers.init_empty(self.charger_topology.number_of_chargers_in_group),
         )
         observation = self.get_observations(state)
+        self.charger_topology.group_rate_current(state.chargers)
         return observation, state
     
     def step_env(self, rng: chex.PRNGKey, state: EnvState, actions: Dict[str, chex.Array]) -> Tuple[TimeStep, EnvState]:
@@ -66,25 +69,34 @@ class Chargax(JaxBaseEnv):
         actions = actions / self.num_discretization_levels
         power_levels = jnp.zeros(self.charger_topology.number_of_chargers_in_group)
 
-        charger_idx = np.arange(len(actions))
-        bottom_level = self.charger_topology.bottom_level
-        slices = jax.tree.map(lambda x: len(x.connections[0]), bottom_level, is_leaf=lambda x: isinstance(x, ChargerGroup))
-        slice_ids = np.cumsum(slices)[:-1]
-        charger_idx_per_slice = np.split(charger_idx, slice_ids)
-        max_group_powers = jax.tree.map(lambda x: x.group_capacity_max, bottom_level, is_leaf=lambda x: isinstance(x, ChargerGroup))
-        assert len(max_group_powers) == len(charger_idx_per_slice)
-        for i in range(len(charger_idx_per_slice)):
-            power_levels = power_levels.at[charger_idx_per_slice[i]].set(
-                actions[charger_idx_per_slice[i]] * max_group_powers[i]
+        idx_per_group = self.charger_topology.chargers_in_group
+        max_powers_per_group = jax.tree.map(lambda x: x.group_capacity_max, self.charger_topology.bottom_level, is_leaf=lambda x: isinstance(x, ChargerGroup))
+        assert len(max_powers_per_group) == len(idx_per_group)
+        for i, charger_group in enumerate(idx_per_group):
+            power_levels = power_levels.at[charger_group].set(
+                actions[charger_group] * max_powers_per_group[i]
             )
 
         power_levels = jnp.minimum(power_levels, state.chargers.car_rate_max)
-        power_levels = power_levels * state.chargers.car_connected
+        power_levels = power_levels * state.chargers.car_connected # Bit redundant, but it's fine
+        if self.renormalize_power_levels:
+            for i, charger_group in enumerate(idx_per_group):
+                total_power_draw_on_group = jnp.sum(power_levels[charger_group])
+                normalization_factor = jax.lax.select(
+                    total_power_draw_on_group > max_powers_per_group[i],
+                    max_powers_per_group[i] / total_power_draw_on_group,
+                    1.
+                )
+                power_levels = power_levels.at[charger_group].set(
+                    power_levels[charger_group] * normalization_factor
+                )
 
         new_charger_state = replace(
             state.chargers,
             charger_rate_current=power_levels
         )
+
+                
 
         # TODO: We may want to renormalize the power levels here at each group level IF the sum exceeds the max group capacity
         # NOTE: Is that realisitc? 
@@ -98,25 +110,28 @@ class Chargax(JaxBaseEnv):
         )
     
     def update_charging_levels(self, state: EnvState) -> EnvState:
-        new_battery_level = state.chargers.battery_level + state.chargers.charger_rate_current
-        new_battery_level = jnp.minimum(new_battery_level, state.chargers.battery_capacity)
+        charge_past_timestep = state.chargers.charger_rate_current / 60 * self.minutes_per_timestep
+        new_battery = jnp.minimum(
+            state.chargers.battery_current + charge_past_timestep,
+            state.chargers.battery_max
+        )
 
         return replace(
             state,
             chargers=replace(
                 state.chargers,
-                battery_level=new_battery_level
+                battery_current=new_battery
             )
         )
     
     def update_time_and_clear_cars(self, state: EnvState) -> EnvState:
 
-        car_waiting_times = state.chargers.time_till_leave - 5
+        car_waiting_times = state.chargers.time_till_leave - self.minutes_per_timestep
         car_waiting_times = jnp.maximum(car_waiting_times, 0)
         car_leaving = jnp.logical_and(car_waiting_times == 0, state.chargers.car_connected)
         cars_leaving_satisfied = jnp.logical_and(
             car_leaving, 
-            state.chargers.battery_level >= (0.9 * state.chargers.battery_capacity)
+            state.chargers.battery_level >= 0.8
         ).sum()
         car_connected = (car_waiting_times * state.chargers.car_connected).astype(bool)
         chargers = replace(
@@ -124,7 +139,6 @@ class Chargax(JaxBaseEnv):
             time_till_leave=car_waiting_times,
             car_connected=car_connected,
         )
-        jax.debug.breakpoint()
         return replace(state, 
             chargers=chargers,
             cars_leaving_satisfied=state.cars_leaving_satisfied + cars_leaving_satisfied
@@ -134,8 +148,22 @@ class Chargax(JaxBaseEnv):
 
         # TODO: Can't index with a tracer into a list; 
         # Some inefficient trick with a lax.switch exists, but we'll need something better
-        new_cars_amount = self.arrival_distributions[0].sample(seed=key)
-        new_cars_amount = jnp.maximum(new_cars_amount, 1).astype(int) # Tmp: at least one car
+        # def sample_distribution(i, key: chex.PRNGKey) -> int:
+        #     return self.arrival_distributions[i].sample(seed=key)
+        # sample_distribution_fn_seq = [partial(sample_distribution, i, key) for i in range(len(self.arrival_distributions))]
+        # new_cars_amount = jax.lax.switch(
+        #     state.timestep, sample_distribution_fn_seq
+        # )
+        # new_cars_amount = self.arrival_distributions[0].sample(seed=key)
+        # new_cars_amount = jnp.maximum(new_cars_amount, 1).astype(int) # Tmp: at least one car
+
+        # Probably create this on reset()
+        ev_arrival_means = [self.arrival_distributions[i]._loc for i in range(len(self.arrival_distributions))]
+        ev_arrival_stds = [self.arrival_distributions[i]._scale for i in range(len(self.arrival_distributions))]
+        ev_arrival_means = jnp.array(ev_arrival_means)
+        ev_arrival_stds = jnp.array(ev_arrival_stds)
+        new_cars_amount = jax.random.normal(key, ()) * ev_arrival_stds[state.timestep] + ev_arrival_means[state.timestep]
+
 
         # Generate new chargers and put the car_connected to False when:
         # 1. The index of the charger is already connected to a car
@@ -170,13 +198,13 @@ class Chargax(JaxBaseEnv):
         raise NotImplementedError()
 
     def get_rewards(self, old_state: EnvState, new_state: EnvState) -> chex.Array:
-        return new_state.cars_leaving_satisfied
+        return new_state.cars_leaving_satisfied - old_state.cars_leaving_satisfied
         
     def get_terminated(self, state: EnvState) -> bool:
         return False
     
     def get_truncated(self, state: EnvState) -> bool:
-        return False
+        return state.timestep >= len(self.arrival_distributions)
     
     def get_info(self, state: EnvState, actions) -> Dict[str, chex.Array]:
         return {}
@@ -187,7 +215,7 @@ class Chargax(JaxBaseEnv):
     @property
     def action_space(self):
         return MultiDiscrete(
-            np.full(self.charger_topology.number_of_chargers_in_group, 10)
+            np.full(self.charger_topology.number_of_chargers_in_group, self.num_discretization_levels)
         )
 
 if __name__ == "__main__":
