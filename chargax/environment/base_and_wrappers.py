@@ -93,7 +93,7 @@ class LogEnvState:
     env_state: EnvState
     episode_returns: float
     returned_episode_returns: float
-    timestep: int
+    train_timestep: int
 
 
 class LogWrapper(JaxEnvWrapper):
@@ -103,7 +103,7 @@ class LogWrapper(JaxEnvWrapper):
             env_state=env_state,
             episode_returns=0.,
             returned_episode_returns=0.,
-            timestep=0,
+            train_timestep=0,
         )
         return obs, state
 
@@ -123,9 +123,9 @@ class LogWrapper(JaxEnvWrapper):
             episode_returns=new_episode_return * (1 - done),
             returned_episode_returns=state.returned_episode_returns * (1 - done)
             + new_episode_return * done,
-            timestep=state.timestep + 1,
+            train_timestep=state.train_timestep + 1,
         )
         info["returned_episode_returns"] = state.returned_episode_returns
         info["returned_episode"] = done
-        info["timestep"] = state.timestep
+        info["train_timestep"] = state.train_timestep
         return TimeStep(obs, reward, terminated, truncated, info), state

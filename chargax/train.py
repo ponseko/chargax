@@ -36,7 +36,7 @@ if __name__ == "__main__":
     )
     trained_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
-    # breakpoint()
+    breakpoint()
 
     # print(jnp.sum(train_rewards))
 

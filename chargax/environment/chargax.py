@@ -94,15 +94,10 @@ class Chargax(JaxBaseEnv):
         new_charger_state = replace(
             state.chargers,
             charger_rate_current=power_levels
-        )
+        )  
 
-                
-
-        # TODO: We may want to renormalize the power levels here at each group level IF the sum exceeds the max group capacity
-        # NOTE: Is that realisitc? 
-        # Or should this just be a negative reward ?
-        # Probably a real controller would have this as a hard contraint... ?
-        # Probably just make this an optional feature for the environment -- toggleable by a flag
+        # TODO: Renormalize power levels per group? (this now only occurs on the lowest level of chargers)
+        # NOTE: this is probably already a fair assumption though.
 
         return replace(
             state,
