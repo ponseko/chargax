@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -7,7 +7,7 @@ from dataclasses import replace, asdict
 import chex
 import distrax
 
-from chargax import JaxBaseEnv, TimeStep, EnvState, ChargerGroup, Chargers, Discrete, MultiDiscrete
+from chargax import JaxBaseEnv, TimeStep, EnvState, ChargerGroup, Chargers, Discrete, MultiDiscrete, Box
 
 # disable jit
 # jax.config.update("jax_disable_jit", True)
@@ -19,6 +19,7 @@ class Chargax(JaxBaseEnv):
     num_discretization_levels: int = 20 # 10 would mean each charger can charge 10%, 20%, ... of its max rate
     minutes_per_timestep: int = 5
     renormalize_power_levels: bool = True
+    elec_price_data: Callable = lambda x: jnp.sin(x) + 1
 
     def __post_init__(self):
         # self.__setattr__("some_property", some_property_value)
@@ -65,6 +66,7 @@ class Chargax(JaxBaseEnv):
     def set_power_levels(self, state: EnvState, actions: chex.Array) -> EnvState:
 
         actions = actions / self.num_discretization_levels
+        actions = jnp.ones_like(actions)
         power_levels = jnp.zeros(self.charger_topology.number_of_chargers_in_group)
 
         idx_per_group = self.charger_topology.chargers_in_group
@@ -124,7 +126,7 @@ class Chargax(JaxBaseEnv):
         car_leaving = jnp.logical_and(car_waiting_times == 0, state.chargers.car_connected)
         cars_leaving_satisfied = jnp.logical_and(
             car_leaving, 
-            state.chargers.battery_level >= 0.8
+            state.chargers.battery_level >= 0.5
         ).sum()
         car_connected = (car_waiting_times * state.chargers.car_connected).astype(bool)
         chargers = replace(
@@ -202,8 +204,9 @@ class Chargax(JaxBaseEnv):
     def get_info(self, state: EnvState, actions) -> Dict[str, chex.Array]:
         return {}
     
-    def observation_space(self, agent: str):
-        raise NotImplementedError()
+    @property
+    def observation_space(self):
+        return Box(-1, 1, (2,))
     
     @property
     def action_space(self):

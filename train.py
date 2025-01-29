@@ -4,7 +4,8 @@ from chargax import (
     interpolate_arrival_data,
     office_distribution_means,
     pretty_print_charger_group,
-    build_random_trainer
+    build_random_trainer,
+    build_ppo_trainer
 )
 
 import jax 
@@ -27,7 +28,9 @@ if __name__ == "__main__":
 
     # raise NotImplementedError("Please implement the training loop")
 
-    random_trainer_train_fn = build_random_trainer(env)
+    random_trainer_train_fn = build_ppo_trainer(
+        env
+    )
 
 
     start_time = time.time()

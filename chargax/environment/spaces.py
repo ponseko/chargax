@@ -2,6 +2,7 @@ import chex
 import numpy as np
 import jax.numpy as jnp
 import jax 
+from typing import Any, Union, Tuple
 
 class Space:
     """Minimal jittable class for abstract gymnax space."""
@@ -61,3 +62,32 @@ class MultiDiscrete(Space):
             and jnp.all(x >= self.start)
             and jnp.all(x < self.nvec)
         )
+    
+
+class Box(Space):
+    """Minimal jittable class for array-shaped gymnax spaces."""
+
+    def __init__(
+        self,
+        low: Union[jnp.ndarray, float],
+        high: Union[jnp.ndarray, float],
+        shape: Tuple[int],
+        dtype: jnp.dtype = jnp.float32,
+    ):
+        self.low = low
+        self.high = high
+        self.shape = shape
+        self.dtype = dtype
+
+    def sample(self, rng: chex.PRNGKey) -> chex.Array:
+        """Sample random action uniformly from 1D continuous range."""
+        return jax.random.uniform(
+            rng, shape=self.shape, minval=self.low, maxval=self.high
+        ).astype(self.dtype)
+
+    def contains(self, x: int) -> jnp.ndarray:
+        """Check whether specific object is within space."""
+        # type_cond = isinstance(x, self.dtype)
+        # shape_cond = (x.shape == self.shape)
+        range_cond = jnp.logical_and(jnp.all(x >= self.low), jnp.all(x <= self.high))
+        return range_cond

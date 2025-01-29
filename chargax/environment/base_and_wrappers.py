@@ -5,6 +5,7 @@ from typing import Tuple, Union, NamedTuple
 import equinox as eqx
 import numpy as np
 import time
+from abc import abstractmethod
 
 @chex.dataclass(frozen=True)
 class EnvState:
@@ -49,7 +50,6 @@ class JaxBaseEnv(eqx.Module):
         done = jnp.any(jnp.logical_or(terminated, truncated))
         
         # Auto-reset environment based on termination
-        # breakpoint()
         state = jax.tree_map(
             lambda x, y: jax.lax.select(done, x, y), state_reset, state_step
         )
@@ -67,15 +67,17 @@ class JaxBaseEnv(eqx.Module):
         obs, state = self.reset_env(key)
         return obs, state
 
+    @abstractmethod
     def reset_env(self, key: chex.PRNGKey) -> Tuple[chex.Array, EnvState]:
         """Environment-specific reset transition."""
-        raise NotImplementedError
+        raise NotImplementedError()
 
+    @abstractmethod
     def step_env(
         self, key: chex.PRNGKey, state: EnvState, action: Union[int, float, chex.Array]
     ) -> Tuple[TimeStep, EnvState]:
         """Environment-specific step transition."""
-        raise NotImplementedError
+        raise NotImplementedError()
 
 
 class JaxEnvWrapper(eqx.Module):
