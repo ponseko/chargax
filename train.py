@@ -1,6 +1,5 @@
 from chargax import (
     Chargax,
-    create_uniform_topology,
     interpolate_arrival_data,
     office_distribution_means,
     pretty_print_charger_group,
@@ -13,13 +12,12 @@ import jax.numpy as jnp
 import time
 
 if __name__ == "__main__":
-    charger_topology = create_uniform_topology(10, 2)
     arrival_distributions = interpolate_arrival_data(
         list(office_distribution_means.values()), 5, 1
     )
     env = Chargax(
-        charger_topology=charger_topology,
-        arrival_distributions=arrival_distributions
+        ev_arrival_data_means=arrival_distributions[0],
+        ev_arrival_data_stds=arrival_distributions[1],
     )
     # obs, env_state = env.reset(jax.random.key(0))
     # for i in range(5):
@@ -42,14 +40,3 @@ if __name__ == "__main__":
     trained_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
     breakpoint()
-
-    # print(jnp.sum(train_rewards))
-
-    
-    # obs, env_state = env.reset(jax.random.key(0))
-    # pretty_print_charger_group(charger_topology, env_state.chargers)
-
-    # for i in range(12):
-    #     (obs, reward, terminated, truncated, info), env_state = env.step(jax.random.key(0), env_state, 0)
-
-    #     pretty_print_charger_group(charger_topology, env_state.chargers)

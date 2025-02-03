@@ -20,7 +20,4 @@ def interpolate_arrival_data(mean_data, timestep_interval_minutes, total_simulat
     
     interpolated_stds = [wrapped_std(interpolated_means, i, std_window_size) for i in range(total_timesteps)]
 
-    return jax.tree.map(
-        lambda mean, std: distrax.Normal(loc=mean, scale=std),
-        interpolated_means.tolist(), interpolated_stds
-    )
+    return interpolated_means.tolist(), interpolated_stds

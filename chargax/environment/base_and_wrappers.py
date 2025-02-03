@@ -45,6 +45,7 @@ class JaxBaseEnv(eqx.Module):
         (obs_step, reward, terminated, truncated, info), state_step = self.step_env(
             key, state, action
         )
+        
         obs_reset, state_reset = self.reset_env(key)
 
         done = jnp.any(jnp.logical_or(terminated, truncated))
@@ -53,10 +54,8 @@ class JaxBaseEnv(eqx.Module):
         state = jax.tree_map(
             lambda x, y: jax.lax.select(done, x, y), state_reset, state_step
         )
-        # state = jax.lax.cond(
-        #     done, lambda: state_reset, lambda: state_step
-        # )
-        obs = jax.lax.cond(done, lambda: obs_reset, lambda: obs_step)
+
+        obs = jax.lax.select(done, obs_reset, obs_step)
 
         info["terminal_observation"] = obs_step
 
@@ -77,7 +76,7 @@ class JaxBaseEnv(eqx.Module):
         self, key: chex.PRNGKey, state: EnvState, action: Union[int, float, chex.Array]
     ) -> Tuple[TimeStep, EnvState]:
         """Environment-specific step transition."""
-        raise NotImplementedError()
+        raise NotImplementedError() 
 
 
 class JaxEnvWrapper(eqx.Module):

@@ -1,25 +1,28 @@
-from typing import Tuple, Dict, List, Callable
+from typing import Tuple, Dict, List, Callable, Type
 import jax
 import jax.numpy as jnp
 import numpy as np
 import equinox as eqx 
 from dataclasses import replace, asdict
 import chex
-import distrax
 
-from chargax import JaxBaseEnv, TimeStep, EnvState, ChargerGroup, Chargers, Discrete, MultiDiscrete, Box
+from chargax import JaxBaseEnv, TimeStep, EnvState, ChargersState, MultiDiscrete, Box, ChargingStation
 
 # disable jit
 # jax.config.update("jax_disable_jit", True)
 
 class Chargax(JaxBaseEnv):
-
-    charger_topology: ChargerGroup
-    arrival_distributions: List[distrax.Distribution]
+    
+    # charger_topology: ChargerGroup
+    
+    ev_arrival_data_means: np.ndarray = eqx.field(converter=np.asarray)
+    ev_arrival_data_stds: np.ndarray = eqx.field(converter=np.asarray)
+    station: ChargingStation = ChargingStation()
     num_discretization_levels: int = 20 # 10 would mean each charger can charge 10%, 20%, ... of its max rate
     minutes_per_timestep: int = 5
-    renormalize_power_levels: bool = True
+    renormalize_currents: bool = True
     elec_price_data: Callable = lambda x: jnp.sin(x) + 1
+    elec_sell_price: float = 1.75 # $/kWh # TODO: Make this a function of time ?
 
     def __post_init__(self):
         # self.__setattr__("some_property", some_property_value)
@@ -31,70 +34,76 @@ class Chargax(JaxBaseEnv):
 
     def reset_env(self, key: chex.PRNGKey) -> Tuple[Dict[str, chex.Array], EnvState]:
         state = EnvState(
-            chargers=Chargers.init_empty(self.charger_topology.number_of_chargers_in_group),
+            chargers_state=ChargersState.__init__empty__(self.station.number_of_chargers),
         )
-        observation = self.get_observations(state)
-        self.charger_topology.group_rate_current(state.chargers)
+        observation = self.get_observation(state)
         return observation, state
     
-    def step_env(self, rng: chex.PRNGKey, state: EnvState, actions: Dict[str, chex.Array]) -> Tuple[TimeStep, EnvState]:
+    def step_env(self, rng: chex.PRNGKey, old_state: EnvState, actions: Dict[str, chex.Array]) -> Tuple[TimeStep, EnvState]:
 
         rng, key = jax.random.split(rng)
-        new_state = state
+        new_state = old_state
 
-        new_state = self.set_power_levels(new_state, actions)
+        self.station.total_power_loss(new_state.chargers_state)
+
+        new_state = self.set_new_currents(new_state, actions)
         new_state = self.update_charging_levels(new_state)
+
+        new_state = self.process_buy_and_sell_electricity(new_state)
 
         new_state = self.update_time_and_clear_cars(new_state)
         new_state = self.add_new_cars(new_state, key)
 
-        timestep_object = TimeStep(
-            observation=self.get_observations(state),
-            reward=self.get_rewards(state, new_state),
-            terminated=self.get_terminated(state),
-            truncated=self.get_truncated(state),
-            info=self.get_info(state, actions)
+        new_state = replace(
+            new_state,
+            timestep=old_state.timestep + 1
         )
 
-        new_state = EnvState(
-            chargers=new_state.chargers,
-            timestep=state.timestep + 1
+        self.charger_topology.get_parent(self.charger_topology.connections[0].connections[0])
+
+        timestep_object = TimeStep(
+            observation=self.get_observation(new_state),
+            reward=self.get_reward(old_state, new_state),
+            terminated=self.get_terminated(new_state),
+            truncated=self.get_truncated(new_state),
+            info=self.get_info(new_state, actions)
         )
     
         return timestep_object, new_state
     
-    def set_power_levels(self, state: EnvState, actions: chex.Array) -> EnvState:
+    def set_new_currents(self, state: EnvState, actions: chex.Array) -> EnvState:
 
         actions = actions / self.num_discretization_levels
-        actions = jnp.ones_like(actions)
-        power_levels = jnp.zeros(self.charger_topology.number_of_chargers_in_group)
+        currents = jnp.zeros(self.station.number_of_chargers)
 
-        idx_per_group = self.charger_topology.chargers_in_group
-        max_powers_per_group = jax.tree.map(lambda x: x.group_capacity_max, self.charger_topology.bottom_level, is_leaf=lambda x: isinstance(x, ChargerGroup))
-        assert len(max_powers_per_group) == len(idx_per_group)
+        idx_per_group = self.station.grouped_charger_ids
+        max_power_draw_per_group = self.station.grouped_charger_max_capacities
+        assert len(max_power_draw_per_group) == len(idx_per_group)
         for i, charger_group in enumerate(idx_per_group):
-            power_levels = power_levels.at[charger_group].set(
-                actions[charger_group] * max_powers_per_group[i]
+            currents = currents.at[charger_group].set(
+                actions[charger_group] * max_power_draw_per_group[i]
             )
+        currents = jnp.minimum(currents, state.chargers_state.car_max_charge_rate) # max_charge_rate is 0 when no car is connected
 
-        power_levels = jnp.minimum(power_levels, state.chargers.car_rate_max)
-        power_levels = power_levels * state.chargers.car_connected # Bit redundant, but it's fine
-        if self.renormalize_power_levels:
-            for i, charger_group in enumerate(idx_per_group):
-                total_power_draw_on_group = jnp.sum(power_levels[charger_group])
-                normalization_factor = jax.lax.select(
-                    total_power_draw_on_group > max_powers_per_group[i],
-                    max_powers_per_group[i] / total_power_draw_on_group,
-                    1.
-                )
-                power_levels = power_levels.at[charger_group].set(
-                    power_levels[charger_group] * normalization_factor
-                )
+        if self.renormalize_currents:
+            currents = self.station.normalize_currents_recursive(currents, state.chargers_state)
+        # bl = self.charger_topology.bottom_level
+        # if self.renormalize_power_levels:
+        #     for i, charger_group in enumerate(idx_per_group):
+        #         total_power_draw_on_group = jnp.sum(power_levels[charger_group])
+        #         normalization_factor = jax.lax.select(
+        #             total_power_draw_on_group > max_powers_per_group[i],
+        #             max_powers_per_group[i] / total_power_draw_on_group,
+        #             1.
+        #         )
+        #         power_levels = power_levels.at[charger_group].set(
+        #             power_levels[charger_group] * normalization_factor
+        #         )
 
         new_charger_state = replace(
-            state.chargers,
-            charger_rate_current=power_levels
-        )  
+            state.chargers_state,
+            charger_currrent_now=currents
+        )
 
         # TODO: Renormalize power levels per group? (this now only occurs on the lowest level of chargers)
         # NOTE: this is probably already a fair assumption though.
@@ -105,7 +114,7 @@ class Chargax(JaxBaseEnv):
         )
     
     def update_charging_levels(self, state: EnvState) -> EnvState:
-        charge_past_timestep = state.chargers.charger_rate_current / 60 * self.minutes_per_timestep
+        charge_past_timestep = state.chargers.charged_past_timestep(self.minutes_per_timestep) #state.chargers.charger_rate_current / 60 * self.minutes_per_timestep
         new_battery = jnp.minimum(
             state.chargers.battery_current + charge_past_timestep,
             state.chargers.battery_max
@@ -119,6 +128,22 @@ class Chargax(JaxBaseEnv):
             )
         )
     
+    def process_buy_and_sell_electricity(self, state: EnvState) -> EnvState:
+        total_power_draw_incl_losses = self.charger_topology.total_draw_group(state.chargers)
+        total_power_draw_incl_losses = total_power_draw_incl_losses / 60 * self.minutes_per_timestep
+        elec_price = self.elec_price_data(state.timestep)
+        total_price_paid = total_power_draw_incl_losses.sum() * elec_price
+
+        charged_past_timestep = state.chargers.charged_past_timestep(self.minutes_per_timestep)
+        total_power_sold = jnp.sum(charged_past_timestep)
+        total_price_received = total_power_sold * self.elec_sell_price
+
+        return replace(
+            state,
+            profit=state.profit + (total_price_received - total_price_paid)
+        )
+
+    
     def update_time_and_clear_cars(self, state: EnvState) -> EnvState:
 
         car_waiting_times = state.chargers.time_till_leave - self.minutes_per_timestep
@@ -128,6 +153,10 @@ class Chargax(JaxBaseEnv):
             car_leaving, 
             state.chargers.battery_level >= 0.5
         ).sum()
+        cars_leaving_unsatisfied = jnp.logical_and(
+            car_leaving,
+            state.chargers.battery_level < 0.5
+        ).sum()
         car_connected = (car_waiting_times * state.chargers.car_connected).astype(bool)
         chargers = replace(
             state.chargers,
@@ -136,7 +165,8 @@ class Chargax(JaxBaseEnv):
         )
         return replace(state, 
             chargers=chargers,
-            cars_leaving_satisfied=state.cars_leaving_satisfied + cars_leaving_satisfied
+            cars_leaving_satisfied=state.cars_leaving_satisfied + cars_leaving_satisfied,
+            cars_leaving_unsatisfied=state.cars_leaving_unsatisfied + cars_leaving_unsatisfied
         )
     
     def add_new_cars(self, state: EnvState, key: chex.PRNGKey) -> EnvState:
@@ -153,11 +183,12 @@ class Chargax(JaxBaseEnv):
         # new_cars_amount = jnp.maximum(new_cars_amount, 1).astype(int) # Tmp: at least one car
 
         # Probably create this on reset()
-        ev_arrival_means = [self.arrival_distributions[i]._loc for i in range(len(self.arrival_distributions))]
-        ev_arrival_stds = [self.arrival_distributions[i]._scale for i in range(len(self.arrival_distributions))]
-        ev_arrival_means = jnp.array(ev_arrival_means)
-        ev_arrival_stds = jnp.array(ev_arrival_stds)
+        # ev_arrival_means = [self.arrival_distributions[i]._loc for i in range(len(self.arrival_distributions))]
+        # ev_arrival_stds = [self.arrival_distributions[i]._scale for i in range(len(self.arrival_distributions))]
+        ev_arrival_means = jnp.array(self.ev_arrival_data_means)
+        ev_arrival_stds = jnp.array(self.ev_arrival_data_stds)
         new_cars_amount = jax.random.normal(key, ()) * ev_arrival_stds[state.timestep] + ev_arrival_means[state.timestep]
+        new_cars_amount = jnp.maximum(new_cars_amount, 0)
 
 
         # Generate new chargers and put the car_connected to False when:
@@ -186,36 +217,44 @@ class Chargax(JaxBaseEnv):
 
         return replace(state, chargers=merged_chargers)
 
-    def get_observations(self, state: EnvState) -> Dict[str, chex.Array]:
-        return jnp.array([0,0])
+    def get_observation(self, state: EnvState) -> chex.Array:
+        # next_price = self.elec_price_data(state.timestep + 1)
+        # next_next_price = self.elec_price_data(state.timestep + 2)
+        # next_price_grad = next_next_price - next_price
+        # next_margin = self.elec_sell_price - self.elec_price_data(state.timestep)
+        return jnp.array([0.0])
 
-    def get_action_masks(self, state: EnvState) -> chex.Array:
-        raise NotImplementedError()
+    # def get_action_masks(self, state: EnvState) -> chex.Array:
+    #     raise NotImplementedError()
 
-    def get_rewards(self, old_state: EnvState, new_state: EnvState) -> chex.Array:
+    def get_reward(self, old_state: EnvState, new_state: EnvState) -> chex.Array:
+        return new_state.profit - old_state.profit
+        return -(new_state.cars_leaving_unsatisfied - old_state.cars_leaving_unsatisfied)
         return new_state.cars_leaving_satisfied - old_state.cars_leaving_satisfied
         
     def get_terminated(self, state: EnvState) -> bool:
         return False
     
     def get_truncated(self, state: EnvState) -> bool:
-        return state.timestep >= len(self.arrival_distributions)
+        return state.timestep >= len(self.ev_arrival_data_means)
     
     def get_info(self, state: EnvState, actions) -> Dict[str, chex.Array]:
-        return {}
+        return {
+            "actions": actions
+        }
     
     @property
     def observation_space(self):
-        return Box(-1, 1, (2,))
+        obs, _ = self.reset_env(jax.random.PRNGKey(0))
+        return Box(-1, 1, obs.shape)
     
     @property
     def action_space(self):
         return MultiDiscrete(
-            np.full(self.charger_topology.number_of_chargers_in_group, self.num_discretization_levels)
+            np.full(self.station.number_of_chargers, self.num_discretization_levels)
         )
 
 if __name__ == "__main__":
     env = Chargax()
-    print(env.name)
     key = jax.random.PRNGKey(0)
     env.reset(key)

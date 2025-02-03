@@ -12,7 +12,7 @@ def create_uniform_topology(num_chargers=10, chargers_per_group=2):
     assert num_chargers > chargers_per_group, "Chargers must be greater than chargers_per_group"
 
     
-    default_charger_max_rate = 200.0
+    default_charger_max_rate = 100.0
 
     charger_indices = np.arange(num_chargers)
     charger_indices = charger_indices.reshape(-1, chargers_per_group)
@@ -47,7 +47,7 @@ def create_uniform_topology(num_chargers=10, chargers_per_group=2):
 
 #     charge_groups = [
 #         ChargerGroup(
-#             connections=[ChargerState() for _ in range(chargers_per_group)],
+#             connections=[ChargersState() for _ in range(chargers_per_group)],
 #             group_capacity_max=default_charge_group_max_capacity
 #         ) for _ in range(chargers // chargers_per_group)
 #     ]
