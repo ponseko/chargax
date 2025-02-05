@@ -26,7 +26,7 @@ if __name__ == "__main__":
 
     # raise NotImplementedError("Please implement the training loop")
 
-    random_trainer_train_fn = build_ppo_trainer(
+    random_trainer_train_fn = build_random_trainer(
         env
     )
 
@@ -37,6 +37,7 @@ if __name__ == "__main__":
     print(
         f"JAX compilation finished in {(time.time() - start_time):.2f} seconds, starting training..."
     )
+    c_time = time.time()
     trained_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
-    breakpoint()
+    print(f"Training took {time.time() - c_time:.2f} seconds")

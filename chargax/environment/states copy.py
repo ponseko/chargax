@@ -31,7 +31,7 @@ class ChargerGroup(eqx.Module):
         This could be a list of chargers or a list of 
         chargergroups (representing switch boards or transformers)
     """
-    group_capacity_max: float = eqx.field(static=True)
+    group_capacity_max_kwh: float = eqx.field(static=True)
     connections: List[Union[ChargerState, 'ChargerGroup']]
 
     @property
