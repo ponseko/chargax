@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, List, Callable, Type
+from typing import Tuple, Dict, List, Callable, Type, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -44,8 +44,6 @@ class Chargax(JaxBaseEnv):
         rng, key = jax.random.split(rng)
         new_state = old_state
 
-        self.station.total_power_loss(new_state.chargers_state)
-
         new_state = self.set_new_currents(new_state, actions)
         new_state = self.update_charging_levels(new_state)
 
@@ -74,34 +72,45 @@ class Chargax(JaxBaseEnv):
         actions = actions / self.num_discretization_levels
         currents = jnp.zeros(self.station.num_chargers)
 
+        self.station.root.efficiency_per_charger
+
         idx_per_group = self.station.charger_ids_per_evse
-        max_current_per_evse = [evse.group_capacity_max_kwh for evse in self.station.evses]
+        max_current_per_evse = [evse.current_max for evse in self.station.evses]
         assert len(max_current_per_evse) == len(idx_per_group)
         for i, charger_group in enumerate(idx_per_group):
             currents = currents.at[charger_group].set(
                 actions[charger_group] * max_current_per_evse[i]
             )
-        currents = jnp.minimum(currents, state.chargers_state.car_max_charge_rate) # max_charge_rate is 0 when no car is connected
-
-        if self.renormalize_currents:
-            currents = self.station.normalize_currents(currents, state.chargers_state)
-
-        return replace(
-            state,
-            chargers_state=replace(
+        
+        currents = jnp.minimum(currents, state.chargers_state.car_max_current_intake) # car_max_current_intake is 0 when no car is connected
+        charger_state = replace(
             state.chargers_state,
             charger_current_now=currents
         )
+
+        if self.renormalize_currents:
+            for evse in self.station.evses:
+                charger_state = evse.normalize_currents(charger_state)
+            # NOTE: I am not sure if looping over the splitters backwards is the correct order
+            # remove the EVSEs from the splitters
+            splitters = [splitter for splitter in self.station.splitters if not isinstance(splitter, type(self.station.evses[0]))]
+            for splitter in splitters[::-1]:
+                charger_state = splitter.normalize_currents(charger_state)
+
+            charger_state = self.station.root.normalize_currents(charger_state)
+
+
+        return replace(
+            state,
+            chargers_state=charger_state
         )
     
     def update_charging_levels(self, state: EnvState) -> EnvState:
 
-        current_per_charger = state.chargers_state.charger_current_now
-        voltage_per_charger = np.array([evse.voltage for evse in self.station.evse_per_chargepoint])
-        power_per_charger = current_per_charger * voltage_per_charger
+        charged_this_timestep = self.kw_to_kw_this_timestep(
+            state.chargers_state.charger_output_now_kw
+        )
         
-        charged_this_timestep = power_per_charger / 60 * self.minutes_per_timestep
-
         new_car_batteries = jnp.minimum(
             state.chargers_state.car_battery_now + charged_this_timestep,
             state.chargers_state.car_battery_capacity
@@ -116,16 +125,15 @@ class Chargax(JaxBaseEnv):
         )
     
     def process_buy_and_sell_electricity(self, state: EnvState) -> EnvState:
-        total_power_draw_incl_losses = self.station.total_power_draw(state.chargers_state)
-        total_power_draw_incl_losses = total_power_draw_incl_losses / 60 * self.minutes_per_timestep
+        total_power_draw_incl_losses = self.kw_to_kw_this_timestep(
+            self.station.root.total_power_draw_kw(state.chargers_state)
+        )
         elec_price = self.elec_price_data(state.timestep)
         total_price_paid = total_power_draw_incl_losses.sum() * elec_price
 
-        current_per_charger = state.chargers_state.charger_current_now
-        voltage_per_charger = np.array([evse.voltage for evse in self.station.evse_per_chargepoint])
-        power_per_charger = current_per_charger * voltage_per_charger
-        charged_this_timestep = power_per_charger / 60 * self.minutes_per_timestep
-        total_power_sold = jnp.sum(charged_this_timestep)
+        total_power_sold = self.kw_to_kw_this_timestep(
+            state.chargers_state.charger_output_now_kw
+        ).sum()
         total_price_received = total_power_sold * self.elec_sell_price
 
         return replace(
@@ -141,11 +149,11 @@ class Chargax(JaxBaseEnv):
         car_leaving = jnp.logical_and(car_waiting_times == 0, state.chargers_state.charger_is_car_connected)
         cars_leaving_satisfied = jnp.logical_and(
             car_leaving, 
-            state.chargers_state.car_battery_level >= 0.9
+            state.chargers_state.car_battery_percentage >= 0.9
         ).sum()
         cars_leaving_unsatisfied = jnp.logical_and(
             car_leaving,
-            state.chargers_state.car_battery_level < 0.0
+            state.chargers_state.car_battery_percentage < 0.0
         ).sum()
         car_connected = (car_waiting_times * state.chargers_state.charger_is_car_connected).astype(bool)
         return replace(
@@ -161,7 +169,6 @@ class Chargax(JaxBaseEnv):
     
     def add_new_cars(self, state: EnvState, key: chex.PRNGKey) -> EnvState:
 
-
         new_cars_amount = jax.random.normal(key, ()) * jnp.array(self.ev_arrival_data_stds)[state.timestep] + jnp.array(self.ev_arrival_data_means)[state.timestep]
         new_cars_amount = jnp.maximum(new_cars_amount, 0)
 
@@ -172,10 +179,7 @@ class Chargax(JaxBaseEnv):
         sort_order = jnp.argsort(not_connected_chargers, descending=True)
         required_chargers = jnp.arange(self.station.num_chargers) < new_cars_amount
         required_chargers_in_order = jnp.zeros_like(required_chargers).at[sort_order].set(required_chargers)
-        incoming_chargers = ChargersState.__init__filled__(
-            self.station.num_chargers,
-            key
-        )
+        incoming_chargers = ChargersState(self.station, sample_method="random", key=key)
         incoming_chargers = replace(
             incoming_chargers, 
             charger_is_car_connected=required_chargers_in_order,
@@ -214,6 +218,9 @@ class Chargax(JaxBaseEnv):
         return {
             "actions": actions
         }
+    
+    def kw_to_kw_this_timestep(self, kw_drawn: Union[float, np.ndarray[float]]) -> chex.Array:
+        return kw_drawn / 60 * self.minutes_per_timestep
     
     @property
     def observation_space(self):

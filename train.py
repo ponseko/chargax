@@ -26,7 +26,7 @@ if __name__ == "__main__":
 
     # raise NotImplementedError("Please implement the training loop")
 
-    random_trainer_train_fn = build_random_trainer(
+    random_trainer_train_fn = build_ppo_trainer(
         env
     )
 

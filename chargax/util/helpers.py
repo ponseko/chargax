@@ -3,7 +3,7 @@ from chargax import EnvState, ChargersState, StationSplitter
 def pretty_print_charger_group(group: StationSplitter, chargers: ChargersState, indent=0, is_last=True, prefix=""):
     indent_str = ' ' * indent
     connector = "└── " if is_last else "├── "
-    print(f"{prefix}{connector}ChargerGroup(group_capacity_max_kwh={group.group_capacity_max_kwh}, group_rate_current={group.group_rate_current(chargers)})")
+    print(f"{prefix}{connector}ChargerGroup(group_capacity_max_kw={group.group_capacity_max_kw}, group_rate_current={group.group_rate_current(chargers)})")
     
     new_prefix = prefix + ("    " if is_last else "│   ")
     for i, connection in enumerate(group.connections):
@@ -26,7 +26,7 @@ def pretty_print_charger_group(group: StationSplitter, chargers: ChargersState, 
 # def pretty_print_charger_group(group, indent=0, is_last=True, prefix=""):
 #     indent_str = ' ' * indent
 #     connector = "└── " if is_last else "├── "
-#     print(f"{prefix}{connector}ChargerGroup(group_capacity_max_kwh={group.group_capacity_max_kwh}, group_rate_current={group.group_rate_current})")
+#     print(f"{prefix}{connector}ChargerGroup(group_capacity_max_kw={group.group_capacity_max_kw}, group_rate_current={group.group_rate_current})")
     
 #     new_prefix = prefix + ("    " if is_last else "│   ")
 #     for i, connection in enumerate(group.connections):
@@ -47,7 +47,7 @@ def pretty_print_charger_group(group: StationSplitter, chargers: ChargersState, 
 # def pretty_print_charger_group(group, indent=0, is_last=True, prefix=""):
 #     indent_str = ' ' * indent
 #     connector = "└── " if is_last else "├── "
-#     print(f"{prefix}{connector}ChargerGroup(group_capacity_max_kwh={group.group_capacity_max_kwh}, group_rate_current={group.group_rate_current})")
+#     print(f"{prefix}{connector}ChargerGroup(group_capacity_max_kw={group.group_capacity_max_kw}, group_rate_current={group.group_rate_current})")
     
 #     new_prefix = prefix + ("    " if is_last else "│   ")
 #     for i, charger in enumerate(group.chargers):

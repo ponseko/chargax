@@ -20,14 +20,14 @@ def create_uniform_topology(num_chargers=10, chargers_per_group=2):
     charge_groups = [
         ChargerGroup(
             connections=[ci],
-            group_capacity_max_kwh=default_charger_max_rate
+            group_capacity_max_kw=default_charger_max_rate
         ) for ci in charger_indices
     ]
     
-    combined_total_capacity = sum([group.group_capacity_max_kwh for group in charge_groups])
+    combined_total_capacity = sum([group.group_capacity_max_kw for group in charge_groups])
     grid_connection_node = ChargerGroup(
         connections=charge_groups,
-        group_capacity_max_kwh=combined_total_capacity
+        group_capacity_max_kw=combined_total_capacity
     )
 
     return grid_connection_node
@@ -48,14 +48,14 @@ def create_uniform_topology(num_chargers=10, chargers_per_group=2):
 #     charge_groups = [
 #         ChargerGroup(
 #             connections=[ChargersState() for _ in range(chargers_per_group)],
-#             group_capacity_max_kwh=default_charge_group_max_capacity
+#             group_capacity_max_kw=default_charge_group_max_capacity
 #         ) for _ in range(chargers // chargers_per_group)
 #     ]
     
-#     combined_total_capacity = sum([group.group_capacity_max_kwh for group in charge_groups])
+#     combined_total_capacity = sum([group.group_capacity_max_kw for group in charge_groups])
 #     grid_connection_node = ChargerGroup(
 #         connections=charge_groups,
-#         group_capacity_max_kwh=combined_total_capacity
+#         group_capacity_max_kw=combined_total_capacity
 #     )
 
 #     return grid_connection_node
