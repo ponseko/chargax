@@ -8,10 +8,11 @@ from dataclasses import replace
 
 class ChargersState(eqx.Module):
     # Car variables
-    # car_time_charging: chex.Array
     car_time_till_leave: chex.Array
     car_battery_now: chex.Array
     car_battery_capacity: chex.Array
+    car_desired_battery_percentage: chex.Array
+    charge_sensitive: chex.Array # False = Time sensitive
 
     car_ac_absolute_max_charge_rate_kw: chex.Array
     car_ac_optimal_charge_threshold: chex.Array
@@ -22,11 +23,42 @@ class ChargersState(eqx.Module):
     charger_current_now: chex.Array
     charger_is_car_connected: chex.Array
     charger_voltage: np.ndarray # We assume this is constant for all chargers
-    # charger_current_max: chex.Array
+    # max current is set in the EVSE
+
+    @property
+    def car_battery_percentage(self) -> jnp.ndarray:
+        return self.car_battery_now / (self.car_battery_capacity + 1e-8)
+    
+    @property
+    def car_battery_desired_remaining(self) -> jnp.ndarray:
+        return jnp.maximum(0, self.car_desired_battery_percentage - self.car_battery_percentage)
+    
+    @property
+    def charger_output_now_kw(self) -> jnp.ndarray:
+        return (self.charger_voltage * self.charger_current_now) / 1000.0
+    
+    @property
+    def charger_throughput_now_kw(self) -> jnp.ndarray:
+        """ Uses absolute value of current to calculate throughput """
+        return (self.charger_voltage * jnp.abs(self.charger_current_now)) / 1000.0
+    
+    @property
+    def car_max_current_intake(self) -> jnp.ndarray:
+        # NOTE: if DC then this needs to change
+        tau = self.car_ac_optimal_charge_threshold 
+        abs_max_rate = self.car_ac_absolute_max_charge_rate_kw
+        # linearly decay the charge rate to 5% after reaching the threshold
+        max_charge_rate_kw = jnp.where(
+            self.car_battery_percentage > tau,
+            abs_max_rate * (1 - (self.car_battery_percentage - tau) / (1 - tau) + 0.10),
+            abs_max_rate
+        ) * self.charger_is_car_connected # charge rate is 0 if car is not connected
+        max_charge_rate_w = max_charge_rate_kw * 1000.0
+        return (max_charge_rate_w / (self.charger_voltage + 1e-8)) # add small value to avoid division by zero
 
     def __init__(
             self, 
-            station: ChargingStation = None, 
+            station: 'ChargingStation' = None, 
             sample_method: Literal["empty", "random", "eu", "us"] = "empty",
             key: Optional[chex.PRNGKey] = None,
             **kwargs
@@ -50,7 +82,9 @@ class ChargersState(eqx.Module):
             self.car_ac_optimal_charge_threshold = jnp.zeros(num_chargers)
             self.car_dc_absolute_max_charge_rate_kw = jnp.zeros(num_chargers)
             self.car_dc_optimal_charge_threshold = jnp.zeros(num_chargers)
-            self.car_battery_capacity = jnp.ones(num_chargers) # ones
+            self.car_battery_capacity = jnp.zeros(num_chargers)
+            self.car_desired_battery_percentage = jnp.zeros(num_chargers)
+            self.charge_sensitive = jnp.zeros(num_chargers, dtype=bool)
         
         elif sample_method == "random":
             assert key is not None, "Key must be provided for random sampling"
@@ -62,31 +96,11 @@ class ChargersState(eqx.Module):
             self.car_dc_absolute_max_charge_rate_kw = jax.random.uniform(keys[4], (num_chargers,), minval=100., maxval=100.)
             self.car_dc_optimal_charge_threshold = jax.random.uniform(keys[5], (num_chargers,), minval=0.8, maxval=0.8)
             self.car_battery_capacity = jax.random.uniform(keys[6], (num_chargers,), minval=290., maxval=299.)
+            self.car_desired_battery_percentage = jax.random.uniform(keys[6], (num_chargers,), minval=0.8, maxval=0.9)
+            self.charge_sensitive = jax.random.randint(keys[0], (num_chargers,), 0, 2).astype(bool)
 
         elif sample_method == "eu" or sample_method == "us":
             raise NotImplementedError("Not implemented yet")
-        
-    @property
-    def car_battery_percentage(self) -> jnp.ndarray:
-        return self.car_battery_now / self.car_battery_capacity
-    
-    @property
-    def charger_output_now_kw(self) -> jnp.ndarray:
-        return (self.charger_voltage * self.charger_current_now) / 1000.0
-    
-    @property
-    def car_max_current_intake(self) -> jnp.ndarray:
-        # NOTE: if DC then this needs to change
-        tau = self.car_ac_optimal_charge_threshold 
-        abs_max_rate = self.car_ac_absolute_max_charge_rate_kw
-        # linearly decay the charge rate to 5% after reaching the threshold
-        max_charge_rate_kw = jnp.where(
-            self.car_battery_percentage > tau,
-            abs_max_rate * (1 - (self.car_battery_percentage - tau) / (1 - tau) + 0.10),
-            abs_max_rate
-        ) * self.charger_is_car_connected # charge rate is 0 if car is not connected
-        max_charge_rate_w = max_charge_rate_kw * 1000.0
-        return (max_charge_rate_w / self.charger_voltage)
 
 class StationSplitter(eqx.Module):
     """
@@ -115,11 +129,11 @@ class StationSplitter(eqx.Module):
     
     @property
     def evses_children(self) -> List['StationEVSE']:
-        return jax.tree_leaves(self.connections, is_leaf=lambda x: isinstance(x, StationEVSE))
+        return jax.tree.leaves(self.connections, is_leaf=lambda x: isinstance(x, StationEVSE))
     
     @property
     def splitters_children(self) -> List['StationSplitter']:
-        return jax.tree_leaves(self.connections, is_leaf=lambda x: isinstance(x, StationSplitter))
+        return jax.tree.leaves(self.connections, is_leaf=lambda x: isinstance(x, StationSplitter))
 
     # @property
     # def evse_per_chargepoint_children(self) -> List['StationEVSE']:
@@ -151,22 +165,40 @@ class StationSplitter(eqx.Module):
         efficiency_to_chargepoint *= self.efficiency
 
         return efficiency_to_chargepoint
+    
+    # def total_draw_or_supply_kw(self, charger_state: 'ChargersState') -> float:
+    #     children_charger_outputs = charger_state.charger_output_now_kw[self.charger_ids_children]
+    #     return jnp.sum(children_charger_outputs)
+    
+    # def total_kw_to_customers(self, charger_state: 'ChargersState') -> float:
+    #     children_charger_outputs = charger_state.charger_output_now_kw[self.charger_ids_children]
+    #     charger_outputs_ex_discharge = jnp.maximum(children_charger_outputs, 0)
+    #     return jnp.sum(charger_outputs_ex_discharge)
+    
+    # def total_kw_to_grid(self, charger_state: 'ChargersState') -> float:
+    #     children_charger_outputs = charger_state.charger_output_now_kw[self.charger_ids_children]
+    #     charger_outputs_ex_charge = jnp.minimum(children_charger_outputs, 0)
+    #     return jnp.sum(jnp.abs(charger_outputs_ex_charge))
 
-    def total_power_output_kw(self, charger_state: 'ChargersState') -> float:
-        children_charger_outputs = charger_state.charger_output_now_kw[self.charger_ids_children]
+    # def total_power_output_kw(self, charger_state: 'ChargersState') -> float:
+    #     children_charger_outputs = charger_state.charger_output_now_kw[self.charger_ids_children]
+    #     return jnp.sum(children_charger_outputs)
+    
+    def total_kw_throughput(self, charger_state: 'ChargersState') -> float:
+        children_charger_outputs = charger_state.charger_throughput_now_kw[self.charger_ids_children]
         return jnp.sum(children_charger_outputs)
     
-    def total_power_draw_kw(self, charger_state: 'ChargersState') -> float:
-        children_charger_outputs = charger_state.charger_output_now_kw[self.charger_ids_children]
-        return jnp.sum(children_charger_outputs / self.efficiency_per_charger)
+    # def total_power_loss_kw(self, charger_state: 'ChargersState') -> float:
+    #     losses = self.total_power_throughput_kw(charger_state) / self.efficiency_per_charger
+    #     return jnp.sum(losses)
     
-    def total_power_loss_kw(self, charger_state: 'ChargersState') -> float:
-        return self.total_power_draw_kw(charger_state) - self.total_power_output_kw(charger_state)
+    # def total_power_draw_kw(self, charger_state: 'ChargersState') -> float:
+    #     return self.total_power_output_kw(charger_state) + self.total_power_loss_kw(charger_state)    
     
     def normalize_currents(self, charger_state: 'ChargersState') -> 'ChargersState':
 
         max_capacity = self.group_capacity_max_kw
-        curr_load = self.total_power_output_kw(charger_state)
+        curr_load = self.total_kw_throughput(charger_state)
         normalization_factor = jax.lax.select(
             curr_load > max_capacity,
             max_capacity / curr_load,
@@ -180,38 +212,6 @@ class StationSplitter(eqx.Module):
             charger_state,
             charger_current_now=currents
         )
-
-        # # NOTE: I am not sure if jax.tree_leaves will flatten the tree in the correct order
-        # splitters_and_evses: List[StationSplitter] = jax.tree_leaves(self.charger_layout, is_leaf=lambda x: isinstance(x, StationSplitter))
-        # for node in splitters_and_evses[::-1]:
-        #     total_power_draw_on_group = jnp.sum(
-        #         currents[node.charger_ids_children] * self.voltages[node.charger_ids_children]
-        #     )
-        #     normalization_factor = jax.lax.select(
-        #         total_power_draw_on_group > node.group_capacity_max_kw,
-        #         node.group_capacity_max_kw / total_power_draw_on_group,
-        #         1.
-        #     )
-        #     currents = currents.at[node.charger_ids_children].set(
-        #         currents[node.charger_ids_children] * normalization_factor
-        #     )
-        # return currents
-                    # if self.renormalize_power_levels:
-        #     for i, charger_group in enumerate(idx_per_group):
-        #         total_power_draw_on_group = jnp.sum(power_levels[charger_group])
-        #         normalization_factor = jax.lax.select(
-        #             total_power_draw_on_group > max_powers_per_group[i],
-        #             max_powers_per_group[i] / total_power_draw_on_group,
-        #             1.
-        #         )
-        #         power_levels = power_levels.at[charger_group].set(
-        #             power_levels[charger_group] * normalization_factor
-        #         )
-
-
-        # First get EVSEs and normalize them
-        # Then get list of Splitter nodes and loop over them backwards
-        # and normalize the children each time
     
     def get_parent(self, root: 'StationSplitter'):
         """
@@ -265,23 +265,17 @@ class ChargingStation(eqx.Module):
         As well as a single object containing the state of all chargers.
     """
     charger_layout: StationSplitter
-    battery: StationBattery = StationBattery()
 
-    def __init__(self, num_chargers: int = 10, num_chargers_per_group: int = 2):
+    def __init__(self, num_chargers: int = 6, num_chargers_per_group: int = 2):
         assert num_chargers % num_chargers_per_group == 0, "Chargers must be divisible by chargers_per_group"
         assert num_chargers_per_group >= 1, "Chargers per group must be greater than 0"
         assert num_chargers > num_chargers_per_group, "Chargers must be greater than chargers_per_group"
-
-        default_charger_max_rate = 100.0
 
         charger_indices = np.arange(num_chargers)
         charger_indices = charger_indices.reshape(-1, num_chargers_per_group)
 
         EVSEs = [
-            StationEVSE(
-                connections=ci,
-                # group_capacity_max_kw=default_charger_max_rate
-            ) for ci in charger_indices
+            StationEVSE(connections=ci) for ci in charger_indices
         ]
         
         combined_total_capacity = sum([group.group_capacity_max_kw for group in EVSEs])
@@ -291,7 +285,6 @@ class ChargingStation(eqx.Module):
         )
 
         self.charger_layout = grid_connection_node
-        self.battery = StationBattery()
 
     @property
     def root(self) -> StationSplitter:
@@ -324,9 +317,16 @@ class ChargingStation(eqx.Module):
 
 @chex.dataclass(frozen=True)
 class EnvState:
+    day_of_year: int # Sampled at reset()
+
     chargers_state: ChargersState
+    battery_state: StationBattery = StationBattery()
     timestep: int = 0
-    cars_leaving_satisfied: int = 0
-    cars_leaving_unsatisfied: int = 0
+
+    # Reward variables
     profit: float = 0.0
+    uncharged_percentages: float = 0.0
+    charged_overtime: int = 0 # Minutes over the desired charge time
+    charged_undertime: int = 0 # Minutes under the desired charge time (positive reward)
+    rejected_customers: int = 0
 

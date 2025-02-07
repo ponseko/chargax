@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from chargax import Chargax, LogWrapper
 from chargax.algorithms.networks import ActorNetworkMultiDiscrete, CriticNetwork
+import wandb
 
 def create_ppo_networks(
     key,
@@ -40,13 +41,25 @@ class PPOConfig:
     num_minibatches: int = 4 # Number of mini-batches
     update_epochs: int = 4 # K epochs to update the policy
     # to be filled in runtime:
-    batch_size: int = 0 # batch size (num_envs * num_steps)
-    minibatch_size: int = 0 # mini-batch size (batch_size / num_minibatches)
-    num_iterations: int = 0 # number of iterations (total_timesteps / num_steps / num_envs)
+    # batch_size: int = 0 # batch size (num_envs * num_steps)
+    # minibatch_size: int = 0 # mini-batch size (batch_size / num_minibatches)
+    # num_iterations: int = 0 # number of iterations (total_timesteps / num_steps / num_envs)
 
     seed: int = 4
-    debug: bool = True
+    debug: bool = False
     evaluate_deterministically: bool = False
+
+    @property
+    def num_iterations(self):
+        return self.total_timesteps // self.num_steps // self.num_envs
+    
+    @property
+    def minibatch_size(self):
+        return self.num_envs * self.num_steps // self.num_minibatches
+
+    @property
+    def batch_size(self):
+        return self.minibatch_size * self.num_minibatches
     
 
 # Define a simple tuple to hold the state of the environment. 
@@ -80,16 +93,6 @@ def build_ppo_trainer(
     num_actions = action_space.n
 
     config = PPOConfig(**config_params)
-    # setting runtime parameters
-    num_iterations = config.total_timesteps // config.num_steps // config.num_envs
-    minibatch_size = config.num_envs * config.num_steps // config.num_minibatches
-    batch_size = minibatch_size * config.num_minibatches
-    config = replace(
-        config,
-        num_iterations=num_iterations,
-        minibatch_size=minibatch_size,
-        batch_size=batch_size
-    )
 
     # rng keys
     rng = jax.random.PRNGKey(config.seed)
@@ -182,6 +185,8 @@ def build_ppo_trainer(
                 env.step, in_axes=(0, 0, 0)
             )(step_key, env_state, action)
             done = jnp.logical_or(terminated, truncated)
+
+            # jax.debug.breakpoint()
 
             # Build a single transition. Jax.lax.scan will build the batch
             # returning num_steps transitions.
@@ -328,11 +333,16 @@ def build_ppo_trainer(
             eval_rewards = eval_func(train_state, eval_key)
             metric["eval_rewards"] = eval_rewards
 
-            if config.debug:
-                def callback(info):
+            def callback(info):
+                if config.debug:
                     print(f'timestep={(info["train_timestep"][-1][0] * config.num_envs)}, eval rewards={info["eval_rewards"]}')
+                if wandb.run:
+                    wandb.log({
+                        "timestep": info["train_timestep"][-1][0] * config.num_envs, 
+                        "eval_rewards": info["eval_rewards"]
+                    })
 
-                jax.debug.callback(callback, metric)
+            jax.debug.callback(callback, metric)
 
             runner_state = (train_state, env_state, last_obs, rng)
             return runner_state, metric 

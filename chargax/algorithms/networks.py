@@ -138,6 +138,6 @@ def create_actor_critic_critic_network(
     actor = ActorNetwork(actor_key, in_shape, actor_features, num_env_actions)
     critic = Q_CriticNetwork(critic1_key, in_shape, critic_features, num_env_actions)
     critic2 = Q_CriticNetwork(critic2_key, in_shape, critic_features, num_env_actions)
-    critic1_target = jax.tree_map(lambda x: x, critic)
-    critic2_target = jax.tree_map(lambda x: x, critic2)
+    critic1_target = jax.tree.map(lambda x: x, critic)
+    critic2_target = jax.tree.map(lambda x: x, critic2)
     return actor, critic, critic2, critic1_target, critic2_target

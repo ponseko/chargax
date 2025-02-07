@@ -51,7 +51,7 @@ class JaxBaseEnv(eqx.Module):
         done = jnp.any(jnp.logical_or(terminated, truncated))
         
         # Auto-reset environment based on termination
-        state = jax.tree_map(
+        state = jax.tree.map(
             lambda x, y: jax.lax.select(done, x, y), state_reset, state_step
         )
 

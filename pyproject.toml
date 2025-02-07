@@ -21,4 +21,10 @@ dependencies = [
 [project.urls]
 "Homepage"="https://github.com/username/chargax"
 
+[tool.setuptools.package-data]
+chargax = ["data/*.csv"]
 
+[tool.pytest.ini_options]
+addopts = [
+    "--import-mode=importlib",
+]
