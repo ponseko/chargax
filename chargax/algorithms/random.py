@@ -11,7 +11,7 @@ from chargax import Chargax, LogWrapper
 class TrainerParams:
     rng: int = 42
     num_envs: int = 4
-    total_timesteps: int = 100_000
+    total_timesteps: int = 10_000
 
 def build_random_trainer(
         env: Chargax,

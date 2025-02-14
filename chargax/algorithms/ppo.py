@@ -40,10 +40,6 @@ class PPOConfig:
     num_steps: int = 128 # steps per environment
     num_minibatches: int = 4 # Number of mini-batches
     update_epochs: int = 4 # K epochs to update the policy
-    # to be filled in runtime:
-    # batch_size: int = 0 # batch size (num_envs * num_steps)
-    # minibatch_size: int = 0 # mini-batch size (batch_size / num_minibatches)
-    # num_iterations: int = 0 # number of iterations (total_timesteps / num_steps / num_envs)
 
     seed: int = 4
     debug: bool = False
@@ -82,7 +78,8 @@ class TrainState(NamedTuple):
 # Jit the returned function, not this function
 def build_ppo_trainer(
         env: Chargax,
-        config_params: dict = {}
+        config_params: dict = {},
+        baselines: dict = {}, # Will be inserted every wandb log step
     ):
 
     # setup env (wrappers) and config
@@ -91,6 +88,7 @@ def build_ppo_trainer(
     observation_space = env.observation_space
     action_space = env.action_space
     num_actions = action_space.n
+    logging_baselines = baselines
 
     config = PPOConfig(**config_params)
 
@@ -339,7 +337,8 @@ def build_ppo_trainer(
                 if wandb.run:
                     wandb.log({
                         "timestep": info["train_timestep"][-1][0] * config.num_envs, 
-                        "eval_rewards": info["eval_rewards"]
+                        "eval_rewards": info["eval_rewards"],
+                        **logging_baselines
                     })
 
             jax.debug.callback(callback, metric)

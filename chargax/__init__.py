@@ -3,7 +3,7 @@ from .environment.states import EnvState, StationSplitter, ChargersState, Chargi
 from .environment.spaces import Discrete, MultiDiscrete, Box
 from .environment.chargax import Chargax
 
-from .environment._data_loaders import get_scenario, get_electricity_prices
+from .environment._data_loaders import get_scenario, get_electricity_prices, get_car_data
 
 # from .scenarios.scenario_data import office_distribution_means
 # from chargax.scenarios.charger_topologies import create_uniform_topology

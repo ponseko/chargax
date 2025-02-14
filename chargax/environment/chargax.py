@@ -7,33 +7,43 @@ from dataclasses import replace, asdict
 import chex
 
 from chargax import JaxBaseEnv, TimeStep, EnvState, ChargersState, MultiDiscrete, Box, ChargingStation
+from ._data_loaders import get_car_data
 
 # disable jit
 # jax.config.update("jax_disable_jit", True)
 
 
-def pre_sample_data(data: np.ndarray, num_samples = 10000) -> np.ndarray:
+def pre_sample_data(data: np.ndarray, num_samples = 10000) -> jnp.ndarray:
     data = np.asarray(data)
     data = np.random.poisson(data, (num_samples, len(data)))
     return jnp.array(data)
 
+def _get_car_data(region: str) -> jnp.ndarray:
+    region = region.lower()
+    return jnp.array(get_car_data(region))
+
 class Chargax(JaxBaseEnv):
     
-    # charger_topology: ChargerGroup
-    
-    ev_arrival_means_workdays: np.ndarray = eqx.field(converter=pre_sample_data)
-    ev_arrival_means_non_workdays: np.ndarray = eqx.field(converter=pre_sample_data)
-    elec_grid_buy_price: Callable = lambda x: jnp.sin(x) + 1.25 
-    elec_grid_sell_diff: Callable = 0.10 # €/kWh
+    # Data:
+    ev_arrival_means_workdays: jnp.ndarray = eqx.field(converter=pre_sample_data)
+    ev_arrival_means_non_workdays: jnp.ndarray = eqx.field(converter=pre_sample_data)
+    elec_grid_buy_price: jnp.ndarray = eqx.field(converter=jnp.asarray) # €/kWh
+    elec_grid_sell_price: jnp.ndarray = eqx.field(converter=jnp.asarray) # €/kWh
     elec_customer_sell_price: float = 0.75 # €/kWh
+    
+    car_profile_data: jnp.ndarray = eqx.field(converter=_get_car_data, default="eu")
 
+    # Station:
     station: ChargingStation = ChargingStation()
 
-    num_discretization_levels: int = 10 # 10 would mean each charger can charge 10%, 20%, ... of its max rate
+    # Env options:
+    num_discretization_levels: int = 20 # 10 would mean each charger can charge 10%, 20%, ... of its max rate
     minutes_per_timestep: int = 5
     renormalize_currents: bool = True
     include_battery: bool = True
     allow_discharging: bool = True
+
+    full_info_dict: bool = False
     
     def __post_init__(self):
         # self.__setattr__("some_property", some_property_value)
@@ -63,7 +73,7 @@ class Chargax(JaxBaseEnv):
         new_state = self.update_time_and_clear_cars(new_state)
         new_state = self.add_new_cars(new_state, key)
 
-        # Set all variables of left cars to 0:
+        # Set all variables of cars that have left to 0:
         charger_state_vars, cs_structure = jax.tree.flatten(new_state.chargers_state)
         charger_state_vars = jax.tree.map(
             lambda x: x * new_state.chargers_state.charger_is_car_connected,
@@ -83,7 +93,7 @@ class Chargax(JaxBaseEnv):
             reward=self.get_reward(old_state, new_state),
             terminated=self.get_terminated(new_state),
             truncated=self.get_truncated(new_state),
-            info=self.get_info(new_state, actions)
+            info=self.get_info(new_state, actions, old_state=old_state)
         )
     
         return timestep_object, new_state
@@ -153,10 +163,18 @@ class Chargax(JaxBaseEnv):
                 battery_now=new_battery_charge
             )
 
+        exceeded_capacity = 0.
+        for splitter in self.station.splitters:
+            exceeded_capacity += jnp.maximum(
+                splitter.total_kw_throughput(charger_state) - splitter.group_capacity_max_kw,
+                0
+            )
+
         return replace(
             state,
             chargers_state=charger_state,
-            battery_state=new_battery_state
+            battery_state=new_battery_state,
+            exceeded_capacity=exceeded_capacity
         )
     
     def process_grid_transactions(self, old_state: EnvState, new_state: EnvState) -> EnvState:
@@ -166,7 +184,7 @@ class Chargax(JaxBaseEnv):
         )
 
         energy_exchanged_w_customers = charged_this_timestep.sum()
-        customer_revenue = energy_exchanged_w_customers * self.elec_sell_price # sell/buy price is the same for customers
+        customer_revenue = energy_exchanged_w_customers * self.elec_customer_sell_price # sell/buy price is the same for customers
 
         grid_energy_transported = jnp.where( # adjust for efficiency
             # When charging, add losses. When discharging, subtract losses
@@ -181,8 +199,8 @@ class Chargax(JaxBaseEnv):
 
         elec_price = jax.lax.select(
             grid_energy_transported >= 0,
-            self.elec_price_data(old_state.timestep), # Buying from grid
-            self.elec_grid_sell_price_data(old_state.timestep) # Selling to grid
+            self.elec_grid_buy_price[new_state.day_of_year][new_state.timestep], # Buying from grid
+            self.elec_grid_sell_price[new_state.day_of_year][new_state.timestep] # Selling to grid
         )
         energy_cost = grid_energy_transported * elec_price # $/kWh -- negative when selling
 
@@ -195,11 +213,10 @@ class Chargax(JaxBaseEnv):
     
     def update_time_and_clear_cars(self, state: EnvState) -> EnvState:
 
-        car_waiting_times = state.chargers_state.car_time_till_leave - self.minutes_per_timestep
-        # car_waiting_times = jnp.maximum(car_waiting_times, 0)
+        car_time_till_leave = state.chargers_state.car_time_till_leave - self.minutes_per_timestep
         
         time_sensitive_leaving = jnp.logical_and(
-            car_waiting_times <= 0, 
+            car_time_till_leave <= 0, 
             ~state.chargers_state.charge_sensitive
         )
         charge_sensitive_leaving = jnp.logical_and(
@@ -211,26 +228,28 @@ class Chargax(JaxBaseEnv):
         ) * state.chargers_state.charger_is_car_connected
 
         uncharged_percentages = (cars_leaving * state.chargers_state.car_battery_desired_remaining).sum()
-        charged_overtime = (cars_leaving * jnp.maximum(car_waiting_times, 0)).sum()
-        charged_undertime = (cars_leaving * jnp.minimum(car_waiting_times, 0)).sum()
+        charged_overtime = (cars_leaving * jnp.maximum(car_time_till_leave, 0)).sum()
+        charged_undertime = jnp.abs((cars_leaving * jnp.minimum(car_time_till_leave, 0)).sum())
         
         car_connected = state.chargers_state.charger_is_car_connected * ~cars_leaving
+        # eqx.debug.breakpoint_if(
+        #     (self.full_info_dict and state.timestep > 100)
+        # )
         return replace(
             state, 
             chargers_state=replace(
                 state.chargers_state,
-                car_time_till_leave=car_waiting_times,
+                car_time_till_leave=car_time_till_leave,
                 charger_is_car_connected=car_connected,
             ),
             uncharged_percentages=state.uncharged_percentages + uncharged_percentages,
             charged_overtime=state.charged_overtime + charged_overtime,
             charged_undertime=state.charged_undertime + charged_undertime,
+            left_customers=state.left_customers + cars_leaving.sum()
         )
     
     def add_new_cars(self, state: EnvState, key: chex.PRNGKey) -> EnvState:
 
-        # new_cars_amount = jax.random.poisson(key, jnp.array(self.ev_arrival_data_means)[state.timestep])
-        # new_cars_amount = jnp.maximum(new_cars_amount, 0)
         new_cars_amount = self.ev_arrival_means_workdays[state.day_of_year][state.timestep]
 
         # Generate new chargers and put the car_connected to False when:
@@ -243,7 +262,7 @@ class Chargax(JaxBaseEnv):
         incoming_chargers = ChargersState(self.station, sample_method="random", key=key)
         incoming_chargers = replace(
             incoming_chargers, 
-            charger_is_car_connected=required_chargers_in_order,
+            charger_is_car_connected=required_chargers_in_order * not_connected_chargers,
         )
         # Merge the incoming chargers with the current chargers
         merged_chargers = jax.tree.map(
@@ -251,6 +270,10 @@ class Chargax(JaxBaseEnv):
                 required_chargers_in_order, new, curr
             ), incoming_chargers, state.chargers_state
         )
+
+        # eqx.debug.breakpoint_if(
+        #     (self.full_info_dict and state.timestep > 100)
+        # )
 
         rejected_customers = jnp.maximum(new_cars_amount - not_connected_chargers.sum(), 0).astype(jnp.int32)
 
@@ -287,9 +310,6 @@ class Chargax(JaxBaseEnv):
                 jnp.array([battery_state.battery_now, battery_state.battery_percentage, battery_state.max_rate_kw])
             ])
 
-
-        
-
         return observations
 
     # def get_action_masks(self, state: EnvState) -> chex.Array:
@@ -302,27 +322,41 @@ class Chargax(JaxBaseEnv):
         charged_overtime_delta = new_state.charged_overtime - old_state.charged_overtime
         charged_undertime_delta = new_state.charged_undertime - old_state.charged_undertime
         rejected_customers_delta = new_state.rejected_customers - old_state.rejected_customers
+        exceeded_capacity_delta = new_state.exceeded_capacity - old_state.exceeded_capacity
 
         return profit_delta - (
-              0.1 * uncharged_delta
-            + 0.1 * charged_overtime_delta
-            + 0.1 * charged_undertime_delta
-            + 0.1 * rejected_customers_delta
+              0.0 * uncharged_delta
+            + 0.0 * (charged_overtime_delta - charged_undertime_delta)
+            + 0.0 * rejected_customers_delta
+            + 0.0 * exceeded_capacity_delta
         )
         
     def get_terminated(self, state: EnvState) -> bool:
         return False
     
     def get_truncated(self, state: EnvState) -> bool:
-        return state.timestep >= len(self.ev_arrival_means_workdays[0])
+        return state.timestep >= self.episode_length
     
-    def get_info(self, state: EnvState, actions) -> Dict[str, chex.Array]:
+    def get_info(self, state: EnvState, actions, old_state: EnvState = None) -> Dict[str, chex.Array]:
+        if not self.full_info_dict:
+            return {}
         return {
-            "actions": actions
+            "actions": actions,
+            **asdict(state),
+            "car_battery_percentage": state.chargers_state.car_battery_percentage,
+            "car_battery_desired_remaining": state.chargers_state.car_battery_desired_remaining,
+            "charger_output_now_kw": state.chargers_state.charger_output_now_kw,
+            "charger_throughput_now_kw": state.chargers_state.charger_throughput_now_kw,
+            "car_max_current_intake": state.chargers_state.car_max_current_intake,
+            "reward": self.get_reward(old_state, state),
         }
     
     def kw_to_kw_this_timestep(self, kw_drawn: Union[float, np.ndarray[float]]) -> chex.Array:
         return kw_drawn / 60 * self.minutes_per_timestep
+    
+    @property
+    def episode_length(self):
+        return len(self.ev_arrival_means_workdays[0])
     
     @property
     def observation_space(self):

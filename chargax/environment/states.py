@@ -4,7 +4,16 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 import equinox as eqx
-from dataclasses import replace
+from dataclasses import replace, fields
+from ._data_loaders import get_car_data
+
+@chex.dataclass(frozen=True)
+class CarProfiles:
+    frequencies: chex.Array
+    threshold_tau: chex.Array
+    capacity: chex.Array
+    ac_max_rate: chex.Array
+    dc_max_rate: chex.Array
 
 class ChargersState(eqx.Module):
     # Car variables
@@ -23,6 +32,7 @@ class ChargersState(eqx.Module):
     charger_current_now: chex.Array
     charger_is_car_connected: chex.Array
     charger_voltage: np.ndarray # We assume this is constant for all chargers
+    charger_is_dc: np.ndarray 
     # max current is set in the EVSE
 
     @property
@@ -44,9 +54,13 @@ class ChargersState(eqx.Module):
     
     @property
     def car_max_current_intake(self) -> jnp.ndarray:
-        # NOTE: if DC then this needs to change
-        tau = self.car_ac_optimal_charge_threshold 
-        abs_max_rate = self.car_ac_absolute_max_charge_rate_kw
+        tau, abs_max_rate = jax.tree.map(
+            lambda x, y: jnp.where(
+                self.charger_is_dc, x, y
+            ), 
+            (self.car_dc_optimal_charge_threshold, self.car_dc_absolute_max_charge_rate_kw),
+            (self.car_ac_optimal_charge_threshold, self.car_ac_absolute_max_charge_rate_kw)
+        )
         # linearly decay the charge rate to 5% after reaching the threshold
         max_charge_rate_kw = jnp.where(
             self.car_battery_percentage > tau,
@@ -59,48 +73,70 @@ class ChargersState(eqx.Module):
     def __init__(
             self, 
             station: 'ChargingStation' = None, 
-            sample_method: Literal["empty", "random", "eu", "us"] = "empty",
+            sample_method: Literal["empty", "eu", "us", "world", "custom"] = "empty",
             key: Optional[chex.PRNGKey] = None,
             **kwargs
         ):
         if kwargs: # To allow for replace(..., **kwargs)
             self.__dict__.update(kwargs)
             return
-
+        
         num_chargers = station.num_chargers
-        rated_voltages = [np.repeat(evse.voltage_rated, len(evse.connections)) for evse in station.evses]
-        voltages_per_charger = np.concatenate(rated_voltages)
-
-        self.charger_current_now = jnp.zeros(num_chargers)
-        self.charger_is_car_connected = jnp.zeros(num_chargers, dtype=bool)
-        self.charger_voltage = voltages_per_charger
 
         if sample_method == "empty":
-            self.car_time_till_leave = jnp.zeros(num_chargers, dtype=int)
-            self.car_battery_now = jnp.zeros(num_chargers)
-            self.car_ac_absolute_max_charge_rate_kw = jnp.zeros(num_chargers)
-            self.car_ac_optimal_charge_threshold = jnp.zeros(num_chargers)
-            self.car_dc_absolute_max_charge_rate_kw = jnp.zeros(num_chargers)
-            self.car_dc_optimal_charge_threshold = jnp.zeros(num_chargers)
-            self.car_battery_capacity = jnp.zeros(num_chargers)
-            self.car_desired_battery_percentage = jnp.zeros(num_chargers)
-            self.charge_sensitive = jnp.zeros(num_chargers, dtype=bool)
+            for field in fields(self):
+                setattr(self, field.name, jnp.zeros(num_chargers))
         
         elif sample_method == "random":
             assert key is not None, "Key must be provided for random sampling"
-            keys = jax.random.split(key, 7)
-            self.car_time_till_leave = jax.random.randint(keys[0], (num_chargers,), 130, 140)
-            self.car_battery_now = jax.random.uniform(keys[1], (num_chargers,), minval=0.10, maxval=0.11)
+            keys = jax.random.split(key, 8)
+            self.car_time_till_leave = jax.random.randint(keys[0], (num_chargers,), 80, 140)
+            self.car_battery_now = jax.random.uniform(keys[1], (num_chargers,), minval=0.10, maxval=0.60)
             self.car_ac_absolute_max_charge_rate_kw = jax.random.uniform(keys[2], (num_chargers,), minval=100., maxval=100.)
             self.car_ac_optimal_charge_threshold = jax.random.uniform(keys[3], (num_chargers,), minval=0.8, maxval=0.8)
             self.car_dc_absolute_max_charge_rate_kw = jax.random.uniform(keys[4], (num_chargers,), minval=100., maxval=100.)
             self.car_dc_optimal_charge_threshold = jax.random.uniform(keys[5], (num_chargers,), minval=0.8, maxval=0.8)
-            self.car_battery_capacity = jax.random.uniform(keys[6], (num_chargers,), minval=290., maxval=299.)
+            self.car_battery_capacity = jax.random.uniform(keys[6], (num_chargers,), minval=200., maxval=299.)
             self.car_desired_battery_percentage = jax.random.uniform(keys[6], (num_chargers,), minval=0.8, maxval=0.9)
-            self.charge_sensitive = jax.random.randint(keys[0], (num_chargers,), 0, 2).astype(bool)
+            self.charge_sensitive = jax.random.randint(keys[7], (num_chargers,), 0, 1).astype(bool)
+        else:
+            car_data = sample_method
+        # elif sample_method in ["eu", "us", "world"]:
+            # car_data = jnp.array(get_car_data(sample_method))
+            probs = car_data[:, 0]
+            cars = jax.random.choice(key, probs.size, shape=(num_chargers,), replace=True, p=probs)
+            tau_car_data = car_data[:, 1]
+            capacity_car_data = car_data[:, 2]
+            ac_max_rate_car_data = car_data[:, 3]
+            dc_max_rate_car_data = car_data[:, 4]
+            self.car_ac_absolute_max_charge_rate_kw = ac_max_rate_car_data[cars]
+            self.car_ac_optimal_charge_threshold = tau_car_data[cars]
+            self.car_dc_absolute_max_charge_rate_kw = dc_max_rate_car_data[cars]
+            self.car_dc_optimal_charge_threshold = tau_car_data[cars]
+            self.car_battery_capacity = capacity_car_data[cars]
 
-        elif sample_method == "eu" or sample_method == "us":
-            raise NotImplementedError("Not implemented yet")
+            keys = jax.random.split(key, 8)
+            self.car_time_till_leave = jax.random.randint(keys[0], (num_chargers,), 80, 140)
+            self.car_battery_now = jax.random.uniform(keys[1], (num_chargers,), minval=0.10, maxval=0.60)
+            self.car_desired_battery_percentage = jax.random.uniform(keys[6], (num_chargers,), minval=0.8, maxval=0.9)
+            self.charge_sensitive = jax.random.randint(keys[7], (num_chargers,), 0, 1)
+        
+        # set types
+        self.car_time_till_leave = self.car_time_till_leave.astype(int)
+        self.charge_sensitive = self.charge_sensitive.astype(bool)
+        
+        # set charger voltage and dc/ac
+        rated_voltages = [np.repeat(evse.voltage_rated, len(evse.connections)) for evse in station.evses]
+        max_kw = [np.repeat(evse.group_capacity_max_kw, len(evse.connections)) for evse in station.evses]
+        voltages_per_charger = np.concatenate(rated_voltages)
+        max_kw_per_charger = np.concatenate(max_kw)
+        self.charger_voltage = voltages_per_charger
+        self.charger_is_dc = max_kw_per_charger > 50.0
+
+        # init these empty for every sample method
+        self.charger_current_now = jnp.zeros(num_chargers)
+        self.charger_is_car_connected = jnp.zeros(num_chargers, dtype=bool)
+        
 
 class StationSplitter(eqx.Module):
     """
@@ -237,12 +273,14 @@ class StationEVSE(StationSplitter):
     An EVSE -- the final splitter in the hierarchy -- is a splitter that connects to the chargers.
     """
     connections: np.ndarray = eqx.field(converter=np.asarray) # Charger indices
-    voltage_rated: float = eqx.field(static=True, default=230.0)
-    current_max: float = eqx.field(static=True, default=50.0)
+    voltage_rated: float = eqx.field(static=True)
+    current_max: float = eqx.field(static=True)
 
-    def __init__(self, connections: np.ndarray, **kwargs):
+    def __init__(self, connections: np.ndarray, voltage_rated: float = 230.0, current_max: float = 50.0, **kwargs):
         self.__dict__.update(kwargs)
         self.connections = connections
+        self.voltage_rated = voltage_rated
+        self.current_max = current_max
         self.group_capacity_max_kw = (self.voltage_rated * self.current_max) / 1000.0
 
 class StationBattery(eqx.Module):
@@ -266,7 +304,7 @@ class ChargingStation(eqx.Module):
     """
     charger_layout: StationSplitter
 
-    def __init__(self, num_chargers: int = 6, num_chargers_per_group: int = 2):
+    def __init__(self, num_chargers: int = 16, num_chargers_per_group: int = 2, num_dc_groups: int = 4):
         assert num_chargers % num_chargers_per_group == 0, "Chargers must be divisible by chargers_per_group"
         assert num_chargers_per_group >= 1, "Chargers per group must be greater than 0"
         assert num_chargers > num_chargers_per_group, "Chargers must be greater than chargers_per_group"
@@ -274,9 +312,13 @@ class ChargingStation(eqx.Module):
         charger_indices = np.arange(num_chargers)
         charger_indices = charger_indices.reshape(-1, num_chargers_per_group)
 
-        EVSEs = [
-            StationEVSE(connections=ci) for ci in charger_indices
+        DC_EVSEs = [
+            StationEVSE(connections=ci, voltage_rated=500.0, current_max=300.0) for ci in charger_indices[:num_dc_groups]
         ]
+        AC_EVSEs = [
+            StationEVSE(connections=ci) for ci in charger_indices[num_dc_groups:] # default is set to 230V, 50A (11.5kW)
+        ]
+        EVSEs = DC_EVSEs + AC_EVSEs
         
         combined_total_capacity = sum([group.group_capacity_max_kw for group in EVSEs])
         grid_connection_node = StationSplitter(
@@ -329,4 +371,6 @@ class EnvState:
     charged_overtime: int = 0 # Minutes over the desired charge time
     charged_undertime: int = 0 # Minutes under the desired charge time (positive reward)
     rejected_customers: int = 0
+    left_customers: int = 0
+    exceeded_capacity: float = 0.0
 
