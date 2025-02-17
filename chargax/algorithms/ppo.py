@@ -35,13 +35,13 @@ class PPOConfig:
     ent_coef: float = 0.01
     vf_coef: float = 0.25
 
-    total_timesteps: int = 1e6
+    total_timesteps: int = 3e6
     num_envs: int = 6
-    num_steps: int = 128 # steps per environment
+    num_steps: int = 256 # steps per environment
     num_minibatches: int = 4 # Number of mini-batches
     update_epochs: int = 4 # K epochs to update the policy
 
-    seed: int = 4
+    seed: int = 42
     debug: bool = False
     evaluate_deterministically: bool = False
 

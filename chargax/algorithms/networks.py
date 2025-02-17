@@ -3,6 +3,7 @@ import equinox as eqx
 from typing import List
 import distrax
 import jax.numpy as jnp
+import chex
         
 
 class ActorNetwork(eqx.Module):
@@ -77,6 +78,10 @@ class ActorNetworkMultiDiscrete(eqx.Module):
     output_heads: list
 
     def __init__(self, key, in_shape, hidden_layers, actions_nvec):
+
+        if isinstance(actions_nvec, chex.Array):
+            actions_nvec = actions_nvec.tolist()
+
         keys = jax.random.split(key, len(hidden_layers))
         self.layers = [eqx.nn.Linear(in_shape, hidden_layers[0], key=keys[0])]
         for i, feature in enumerate(hidden_layers[:-1]):

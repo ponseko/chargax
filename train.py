@@ -103,24 +103,11 @@ def create_baseline_rewards(env: Chargax, num_iterations=10):
     baseline_rewards = {k: np.mean(v) for k, v in baseline_rewards.items()}
     return baseline_rewards
 
-
-
-# elif method == "random":
-#             action = env.action_space.sample(action_key)
-#         elif method == "max":
-#             max_action = env.action_space.nvec.max()
-#             action = jnp.ones_like(env.action_space.nvec) * max_action
-
-
-
 if __name__ == "__main__":
-    arrival_distributions = get_scenario("office")
-    car_data = get_car_data(dataset="eu")
     env = Chargax(
-        ev_arrival_means_workdays=arrival_distributions,
-        ev_arrival_means_non_workdays=arrival_distributions,
         elec_grid_buy_price=get_electricity_prices(),
-        elec_grid_sell_price=get_electricity_prices() - 0.1,
+        elec_grid_sell_price=get_electricity_prices() - 0.03,
+        scenario="public",
     )
 
     baselines = create_baseline_rewards(env)
@@ -141,17 +128,16 @@ if __name__ == "__main__":
     trained_agent = trained_runner_state[0]
     key = trained_runner_state[-1]
 
-    env = Chargax(
-        ev_arrival_means_workdays=arrival_distributions,
-        ev_arrival_means_non_workdays=arrival_distributions,
-        elec_grid_buy_price=get_electricity_prices(),
-        elec_grid_sell_price=get_electricity_prices() - 0.1,
-        full_info_dict=True
-    )
+    # env = Chargax(
+    #     elec_grid_buy_price=get_electricity_prices(),
+    #     elec_grid_sell_price=get_electricity_prices() - 0.1,
+    #     scenario="public",
+    #     full_info_dict=True
+    # )
 
     wandb.finish()
 
-    episode_reward, infos = eval_func(trained_agent, key)
+    # episode_reward, infos = eval_func(trained_agent, key)
     # breakpoint()
-    print(f"Episode reward: {episode_reward}")
-    log_info(infos)
+    # print(f"Episode reward: {episode_reward}")
+    # log_info(infos)
