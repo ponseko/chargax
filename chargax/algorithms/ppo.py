@@ -335,11 +335,19 @@ def build_ppo_trainer(
                 if config.debug:
                     print(f'timestep={(info["train_timestep"][-1][0] * config.num_envs)}, eval rewards={info["eval_rewards"]}')
                 if wandb.run:
-                    wandb.log({
-                        "timestep": info["train_timestep"][-1][0] * config.num_envs, 
-                        "eval_rewards": info["eval_rewards"],
-                        **logging_baselines
-                    })
+                    if "logging_data" not in info:
+                        info["logging_data"] = {}
+                    finished_episodes = info["returned_episode"] 
+                    if finished_episodes.any():
+                        info["logging_data"] = jax.tree.map(
+                            lambda x: x[finished_episodes].mean(), info["logging_data"]
+                        )
+                        wandb.log({
+                            "timestep": info["train_timestep"][-1][0] * config.num_envs, 
+                            "eval_rewards": info["eval_rewards"],
+                            **info["logging_data"],
+                            **logging_baselines
+                        })
 
             jax.debug.callback(callback, metric)
 
@@ -354,4 +362,4 @@ def build_ppo_trainer(
 
         return trained_runner_state, train_metrics
 
-    return train_func
+    return train_func, config

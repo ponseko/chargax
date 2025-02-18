@@ -64,10 +64,9 @@ def get_scenario(dataset: str, average_cars_per_day: int = 100, minutes_per_time
         "car_energy_demand.csv"
     ]
     data = [_load_scenario_data(resources.joinpath(DATA_FOLDER, file)) for file in csv_files]
-
     desired_length = 24 * 60 // minutes_per_timestep
-    data[0] = _average_data(data[0], desired_length) * average_cars_per_day
-    data[1] = _average_data(data[1], desired_length) * average_cars_per_day
+    data[0] = (_average_data(data[0], desired_length) / 100) * average_cars_per_day # data is in percentages (0-100) --> make it absolute
+    data[1] = (_average_data(data[1], desired_length) / 100) * average_cars_per_day # data is in percentages (0-100) --> make it absolute
     data[2] = data[2] * 60 # convert hours to minutes
     return tuple(data)
 

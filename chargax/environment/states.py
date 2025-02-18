@@ -5,7 +5,6 @@ import numpy as np
 import jax
 import equinox as eqx
 from dataclasses import replace, fields
-from ._data_loaders import get_car_data, get_scenario
 
 @chex.dataclass(frozen=True)
 class CarProfiles:
@@ -84,11 +83,7 @@ class ChargersState(eqx.Module):
 
     def __init__(
             self, 
-            charge_sensitive_prob: float = 0.5,
             station: 'ChargingStation' = None, 
-            sample_method: Literal["empty", "eu", "us", "world", "custom"] = "empty",
-            user_profiles: Literal["private", "public", "workplace"] = "public",
-            key: Optional[chex.PRNGKey] = None,
             **kwargs
         ):
         if kwargs: # To allow for replace(..., **kwargs)
@@ -97,59 +92,10 @@ class ChargersState(eqx.Module):
         
         num_chargers = station.num_chargers
 
-        if sample_method == "empty":
-            for field in fields(self):
-                setattr(self, field.name, jnp.zeros(num_chargers))
-        
-        elif sample_method == "random":
-            assert key is not None, "Key must be provided for random sampling"
-            keys = jax.random.split(key, 8)
-            self.car_time_till_leave = jax.random.randint(keys[0], (num_chargers,), 80, 140)
-            self.car_battery_now_kw = jax.random.uniform(keys[1], (num_chargers,), minval=0.10, maxval=0.60)
-            self.car_ac_absolute_max_charge_rate_kw = jax.random.uniform(keys[2], (num_chargers,), minval=100., maxval=100.)
-            self.car_ac_optimal_charge_threshold = jax.random.uniform(keys[3], (num_chargers,), minval=0.8, maxval=0.8)
-            self.car_dc_absolute_max_charge_rate_kw = jax.random.uniform(keys[4], (num_chargers,), minval=100., maxval=100.)
-            self.car_dc_optimal_charge_threshold = jax.random.uniform(keys[5], (num_chargers,), minval=0.8, maxval=0.8)
-            self.car_battery_capacity_kw = jax.random.uniform(keys[6], (num_chargers,), minval=200., maxval=299.)
-            self.car_desired_battery_percentage = jax.random.uniform(keys[6], (num_chargers,), minval=0.8, maxval=0.9)
-            self.charge_sensitive = jax.random.randint(keys[7], (num_chargers,), 0, 1).astype(bool)
-        elif sample_method in ["eu", "us", "world"]:
-            car_data = jnp.array(get_car_data(sample_method))
-            probs = car_data[:, 0]
-            cars = jax.random.categorical(key, probs, shape=(num_chargers,))
-            tau_car_data = car_data[:, 1]
-            capacity_car_data = car_data[:, 2]
-            ac_max_rate_car_data = car_data[:, 3]
-            dc_max_rate_car_data = car_data[:, 4]
-            self.car_ac_absolute_max_charge_rate_kw = ac_max_rate_car_data[cars]
-            self.car_ac_optimal_charge_threshold = tau_car_data[cars]
-            self.car_dc_absolute_max_charge_rate_kw = dc_max_rate_car_data[cars]
-            self.car_dc_optimal_charge_threshold = tau_car_data[cars]
-            self.car_battery_capacity_kw = capacity_car_data[cars]
+        # if sample_method == "empty":
+        for field in fields(self):
+            setattr(self, field.name, jnp.zeros(num_chargers))
 
-            _, _, connection_times, energy_demands = get_scenario(user_profiles)
-            keys = jax.random.split(key, 3)
-            connection_times_rnd = jax.random.randint(keys[0], (num_chargers,), 0, 101)
-            energy_demands_rnd = jax.random.randint(keys[1], (num_chargers,), 0, 101)
-            self.car_time_till_leave = connection_times[connection_times_rnd]
-            energy_demands = energy_demands[energy_demands_rnd]
-            current_batteries = self.car_battery_capacity_kw - energy_demands
-            self.car_battery_now_kw = jnp.clip(
-                current_batteries,
-                0.03 * self.car_battery_capacity_kw,
-                self.car_battery_capacity_kw
-            )
-
-            self.car_desired_battery_percentage = jax.random.uniform(keys[2], (num_chargers,), minval=0.8, maxval=0.95)
-            self.charge_sensitive = jnp.zeros(num_chargers)
-
-            # # charge sensitive based on env settings
-            # self.charge_sensitive = jax.random.categorical(
-            #     keys[4], 
-            #     np.array([charge_sensitive_prob, 1 - charge_sensitive_prob]),
-            #     shape=(num_chargers,)
-            # )
-        
         # set types
         self.car_time_till_leave = self.car_time_till_leave.astype(int)
         self.charge_sensitive = self.charge_sensitive.astype(bool)
@@ -319,7 +265,7 @@ class StationBattery(eqx.Module):
     """
     capacity_kw: float = 100000.0
     battery_now: float = 200.0
-    max_rate_kw: float = 500.0
+    max_rate_kw: float = 1000.0
 
     @property
     def battery_percentage(self) -> float:
@@ -404,4 +350,6 @@ class EnvState:
     rejected_customers: int = 0
     left_customers: int = 0
     exceeded_capacity: float = 0.0
+    total_charged_kw: float = 0.0
+    total_discharged_kw: float = 0.0
 

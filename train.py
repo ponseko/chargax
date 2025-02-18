@@ -16,6 +16,8 @@ from dataclasses import replace
 import chex
 from typing import Literal
 import numpy as np
+import equinox as eqx
+import argparse
 
 def eval_func(train_state, rng):
 
@@ -55,7 +57,7 @@ def log_info(info):
     wandb.finish()
 
 
-def create_baseline_rewards(env: Chargax, num_iterations=10):
+def create_baseline_rewards(env: Chargax, num_iterations=100):
     """ 
         Create a baseline for a random and max action agent
         averaged over num_iterations
@@ -82,36 +84,72 @@ def create_baseline_rewards(env: Chargax, num_iterations=10):
         done = jnp.logical_or(terminated, truncated)
         return (rng, obs, env_state, done, episode_reward), info
 
+    env = eqx.tree_at(lambda x: x.full_info_dict, env, True)
     baseline_rewards = {}
     rng = jax.random.PRNGKey(0)
     rng, reset_key = jax.random.split(rng)
     obs, env_state = env.reset(reset_key)
     for method in ["random_actions", "maximum_actions"]:
-        baseline_rewards[method] = []
+        baseline_rewards[method] = {
+            "episode_rewards": [],
+            "profit": []
+        }
         if method == "random_actions":
             step_env = step_env_random
         elif method == "maximum_actions":
             step_env = step_env_max
         for _ in range(num_iterations):
-            (rng, obs, env_state, done, episode_reward), _ = jax.lax.scan(
+            (rng, obs, env_state, done, episode_reward), info = jax.lax.scan(
                 step_env, 
                 (rng, obs, env_state, False, 0.0), 
                 length=env.episode_length
             )
-            baseline_rewards[method].append(episode_reward)
+            baseline_rewards[method]["episode_rewards"].append(episode_reward)
+            baseline_rewards[method]["profit"].append(info["profit"][-1])
 
-    baseline_rewards = {k: np.mean(v) for k, v in baseline_rewards.items()}
+    baseline_rewards = {
+        k: {
+            "episode_rewards": np.mean(v["episode_rewards"]),
+            "profit": np.mean(v["profit"])
+        } for k, v in baseline_rewards.items()
+    }
     return baseline_rewards
 
 if __name__ == "__main__":
+
+    argument_parser = argparse.ArgumentParser()
+    args, extra_args = argument_parser.parse_known_args()
+
+    # Convert extra_args to a dictionary. we assume that they set environment parameters.
+    env_parameters = {}
+    for i in range(0, len(extra_args), 2):
+        key = extra_args[i].lstrip('--')
+        # check if the value is a float or an int
+        if "." in extra_args[i + 1]:
+            try:
+                value = float(extra_args[i + 1])
+            except ValueError:
+                value = extra_args[i + 1]
+        else:
+            try:
+                value = int(extra_args[i + 1])
+            except ValueError:
+                value = extra_args[i + 1]
+        # if its a False or True string, convert it to a boolean
+        if value == "False":
+            value = False
+        elif value == "True":
+            value = True
+        env_parameters[key] = value
+
     env = Chargax(
         elec_grid_buy_price=get_electricity_prices(),
         elec_grid_sell_price=get_electricity_prices() - 0.03,
-        scenario="public",
+        **env_parameters
     )
 
     baselines = create_baseline_rewards(env)
-    random_trainer_train_fn = build_ppo_trainer(env, baselines=baselines)#, {"num_envs": 1, "total_timesteps": 1000})
+    random_trainer_train_fn, config = build_ppo_trainer(env, baselines=baselines)#, {"num_envs": 1, "total_timesteps": 1000})
 
     start_time = time.time()
     print("Starting JAX compilation...")
@@ -120,7 +158,7 @@ if __name__ == "__main__":
         f"JAX compilation finished in {(time.time() - start_time):.2f} seconds, starting training..."
     )
     c_time = time.time()
-    wandb.init(project="chargax", entity="FelixAndKoen")
+    wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__)
     trained_runner_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
     print(f"Training took {time.time() - c_time:.2f} seconds")
@@ -131,7 +169,6 @@ if __name__ == "__main__":
     # env = Chargax(
     #     elec_grid_buy_price=get_electricity_prices(),
     #     elec_grid_sell_price=get_electricity_prices() - 0.1,
-    #     scenario="public",
     #     full_info_dict=True
     # )
 
