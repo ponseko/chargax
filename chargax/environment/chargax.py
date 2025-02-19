@@ -411,8 +411,10 @@ class Chargax(JaxBaseEnv):
                 car_desired_battery_percentage,
                 chargers_state.car_battery_percentage # users can't desire less than what they have
             )
-
-            charge_sensitive = jnp.zeros_like(chargers_state.charge_sensitive)
+            if self.user_profile == "highway":
+                charge_sensitive = jax.random.bernoulli(keys[2], 0.9, shape=(self.station.num_chargers,))
+            else:
+                charge_sensitive = jax.random.bernoulli(keys[2], 0.1, shape=(self.station.num_chargers,))
 
             chargers_state = replace(
                 chargers_state,
