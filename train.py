@@ -118,6 +118,9 @@ def create_baseline_rewards(env: Chargax, num_iterations=100):
 if __name__ == "__main__":
 
     argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("--seed", type=int, default=42)
+    argument_parser.add_argument("--user_profiles", type=str, choices=["highway", "residential", "workplace", "shopping"], required=True)
+    argument_parser.add_argument("--arrival_frequency", type=str, choices=["low", "medium", "high"], required=True)
     args, extra_args = argument_parser.parse_known_args()
 
     # Convert extra_args to a dictionary. we assume that they set environment parameters.
@@ -145,11 +148,20 @@ if __name__ == "__main__":
     env = Chargax(
         elec_grid_buy_price=get_electricity_prices(),
         elec_grid_sell_price=get_electricity_prices(),
+        user_profiles=args.user_profiles,
+        arrival_frequency=args.arrival_frequency,
         **env_parameters
     )
 
     baselines = create_baseline_rewards(env)
-    random_trainer_train_fn, config = build_ppo_trainer(env, baselines=baselines)#, {"num_envs": 1, "total_timesteps": 1000})
+    random_trainer_train_fn, config = build_ppo_trainer(
+        env, 
+        config_params={
+            "total_timesteps": 10000000,
+            "seed": args.seed
+        },
+        baselines=baselines
+    )#, {"num_envs": 1, "total_timesteps": 1000})
 
     start_time = time.time()
     print("Starting JAX compilation...")
@@ -157,8 +169,9 @@ if __name__ == "__main__":
     print(
         f"JAX compilation finished in {(time.time() - start_time):.2f} seconds, starting training..."
     )
+    groupname = args.user_profiles + "_" + args.arrival_frequency
     c_time = time.time()
-    wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__)
+    wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__, group=groupname)
     trained_runner_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
     print(f"Training took {time.time() - c_time:.2f} seconds")
