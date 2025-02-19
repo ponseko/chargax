@@ -18,7 +18,7 @@ class Chargax(JaxBaseEnv):
     
     elec_grid_buy_price: jnp.ndarray = eqx.field(converter=jnp.asarray) # €/kWh
     elec_grid_sell_price: jnp.ndarray = eqx.field(converter=jnp.asarray) # €/kWh
-    elec_customer_sell_price: float = 0.70 # €/kWh
+    elec_customer_sell_price: float = 0.75 # €/kWh
 
     # Data:
     ev_arrival_means_workdays: jnp.ndarray = None
@@ -33,8 +33,8 @@ class Chargax(JaxBaseEnv):
 
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
-    charged_satisfaction_alpha: float = 0.25
-    time_satisfaction_alpha: float = 0.25
+    charged_satisfaction_alpha: float = 0.0
+    time_satisfaction_alpha: float = 0.0
     rejected_customers_alpha: float = 0.0
     battery_degredation_alpha: float = 0.0
 
@@ -166,18 +166,19 @@ class Chargax(JaxBaseEnv):
             charger_state = self.station.root.normalize_currents(charger_state) 
 
         ### Update Car Battery Levels
-        charged_this_timestep = self.kw_to_kw_this_timestep(
+        tried_charged_this_timestep = self.kw_to_kw_this_timestep(
             charger_state.charger_output_now_kw
         )
         new_car_batteries = jnp.clip(
-            state.chargers_state.car_battery_now_kw + charged_this_timestep,
-            0,
+            state.chargers_state.car_battery_now_kw + tried_charged_this_timestep,
+            state.chargers_state.car_arrival_battery_kw, # can't discharge under arrival battery
             state.chargers_state.car_battery_capacity_kw
         )
+        actual_charged_this_timestep = new_car_batteries - state.chargers_state.car_battery_now_kw
 
         # update discharged
         discharged_this_session = jnp.maximum(
-            state.chargers_state.car_discharged_this_session_kw + -charged_this_timestep,
+            state.chargers_state.car_discharged_this_session_kw + -actual_charged_this_timestep,
             0
         )
 
@@ -237,17 +238,14 @@ class Chargax(JaxBaseEnv):
             new_state.chargers_state.car_battery_now_kw - old_state.chargers_state.car_battery_now_kw 
         )
 
-        energy_sold_to_customers = charged_this_timestep
+        energy_sold_to_customers = jnp.maximum(charged_this_timestep, 0)
         # some energy should be free because it was discharged earlier
         discharged_earlier = old_state.chargers_state.car_discharged_this_session_kw
         energy_sold_to_customers = jnp.maximum(
             energy_sold_to_customers - discharged_earlier,
             0
-        )       
+        )
         customer_revenue = energy_sold_to_customers.sum() * self.elec_customer_sell_price
-
-        # energy_exchanged_w_customers = charged_this_timestep.sum()
-        # customer_revenue = energy_exchanged_w_customers * self.elec_customer_sell_price # sell/buy price is the same for customers
 
         grid_energy_transported = jnp.where( # adjust for efficiency
             # When charging, add losses. When discharging, subtract losses
@@ -290,7 +288,7 @@ class Chargax(JaxBaseEnv):
             time_sensitive_leaving, charge_sensitive_leaving
         ) * state.chargers_state.charger_is_car_connected
 
-        uncharged_percentages = (cars_leaving * state.chargers_state.car_battery_desired_remaining).sum()
+        uncharged_percentages = (cars_leaving * jnp.maximum(0, state.chargers_state.car_battery_desired_remaining)).sum()
         
         charged_overtime = jnp.abs(
             cars_leaving * jnp.minimum(
@@ -299,9 +297,18 @@ class Chargax(JaxBaseEnv):
             )).sum()
         charged_undertime = (cars_leaving * jnp.maximum(car_time_till_leave, 0)).sum()
 
-        # eqx.debug.breakpoint_if(
-        #     (self.full_info_dict and state.timestep > 100)
-        # )
+        # # Compensate cars that leave with less battery than they arrived with
+        # # NOTE: could also block this, but lets leave the agent flexible
+        # kw_to_compensate = jnp.where(
+        #     jnp.logical_and(
+        #         state.chargers_state.car_battery_now_kw < state.chargers_state.car_arrival_battery_kw,
+        #         state.chargers_state.car_battery_desired_remaining > 0
+        #     ),
+        #     state.chargers_state.car_arrival_battery_kw - state.chargers_state.car_battery_now_kw,
+        #     0
+        # ) * cars_leaving
+        # currency_to_compensate = kw_to_compensate.sum() * self.elec_customer_sell_price
+        # profit = state.profit - currency_to_compensate
         
         car_connected = state.chargers_state.charger_is_car_connected * ~cars_leaving
 
@@ -316,6 +323,7 @@ class Chargax(JaxBaseEnv):
             charged_overtime=state.charged_overtime + charged_overtime,
             charged_undertime=state.charged_undertime + charged_undertime,
             left_customers=state.left_customers + cars_leaving.sum(),
+            # profit=profit
         )
     
     def add_new_cars(self, state: EnvState, key: chex.PRNGKey) -> EnvState:
@@ -414,7 +422,10 @@ class Chargax(JaxBaseEnv):
                 charge_sensitive=charge_sensitive
             )
 
-        return chargers_state
+        return replace(
+            chargers_state,
+            car_arrival_battery_kw=chargers_state.car_battery_now_kw, # copy the initial battery percentage
+        )
 
     def get_observation(self, state: EnvState) -> chex.Array:
 
@@ -431,6 +442,10 @@ class Chargax(JaxBaseEnv):
             charger_state.car_battery_desired_remaining,
             charger_state.car_max_current_intake,
             charger_state.car_max_current_outtake,
+            charger_state.car_discharged_this_session_kw,
+            charger_state.car_arrival_battery_kw,
+            state.chargers_state.car_battery_now_kw < state.chargers_state.car_arrival_battery_kw,
+            state.chargers_state.car_arrival_battery_kw - state.chargers_state.car_battery_now_kw,
 
             charger_state.car_ac_absolute_max_charge_rate_kw,
             charger_state.car_ac_optimal_charge_threshold,
@@ -444,14 +459,33 @@ class Chargax(JaxBaseEnv):
                 jnp.array([battery_state.battery_now, battery_state.battery_percentage, battery_state.max_rate_kw])
             ])
 
+        timesteps_per_hour = 60 // self.minutes_per_timestep
+        price_now = self.elec_grid_buy_price[state.day_of_year][state.timestep]
+        price_plus_1 = self.elec_grid_buy_price[state.day_of_year][(state.timestep + timesteps_per_hour)]
+        price_plus_2 = self.elec_grid_buy_price[state.day_of_year][(state.timestep + timesteps_per_hour * 2)]
+        price_plus_3 = self.elec_grid_buy_price[state.day_of_year][(state.timestep + timesteps_per_hour * 3)]
+        price_plus_4 = self.elec_grid_buy_price[state.day_of_year][(state.timestep + timesteps_per_hour * 4)]
+        price_plus_5 = self.elec_grid_buy_price[state.day_of_year][(state.timestep + timesteps_per_hour * 5)]
+        price_diff_next = price_plus_1 - price_now
+
+        sell_price_now = self.elec_grid_sell_price[state.day_of_year][state.timestep]
+        sell_price_plus_1 = self.elec_grid_sell_price[state.day_of_year][(state.timestep + timesteps_per_hour)]
+        sell_price_plus_2 = self.elec_grid_sell_price[state.day_of_year][(state.timestep + timesteps_per_hour * 2)]
+        sell_price_plus_3 = self.elec_grid_sell_price[state.day_of_year][(state.timestep + timesteps_per_hour * 3)]
+        sell_price_plus_4 = self.elec_grid_sell_price[state.day_of_year][(state.timestep + timesteps_per_hour * 4)]
+        sell_price_plus_5 = self.elec_grid_sell_price[state.day_of_year][(state.timestep + timesteps_per_hour * 5)]
+        price_diff_next_sell = sell_price_plus_1 - sell_price_now
+
+
         observations = jnp.concatenate([
             observations,
             jnp.array([
                 state.timestep, 
                 state.day_of_year,
                 state.is_workday,
-                self.elec_grid_buy_price[state.day_of_year][state.timestep],
-                self.elec_grid_sell_price[state.day_of_year][state.timestep]
+                price_now, price_plus_1, price_plus_2, price_plus_3, price_plus_4, price_plus_5,
+                sell_price_now, sell_price_plus_1, sell_price_plus_2, sell_price_plus_3, sell_price_plus_4, sell_price_plus_5,
+                price_diff_next, price_diff_next_sell
             ])
         ])
 
@@ -496,6 +530,8 @@ class Chargax(JaxBaseEnv):
                     "uncharged_percentages" : state.uncharged_percentages,
                     "charged_overtime": state.charged_overtime,
                     "charged_undertime": state.charged_undertime,
+                    "battery_level": state.battery_state.battery_now,
+                    "battery_percentage": state.battery_state.battery_percentage,
                 }
             }
         return {

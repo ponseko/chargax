@@ -130,3 +130,85 @@ class LogWrapper(JaxEnvWrapper):
         info["returned_episode"] = done
         info["train_timestep"] = state.train_timestep
         return TimeStep(obs, reward, terminated, truncated, info), state
+    
+
+
+
+
+@chex.dataclass(frozen=True)
+class NormalizeVecObsEnvState:
+    mean: jnp.ndarray
+    var: jnp.ndarray
+    count: float
+    env_state: EnvState
+
+
+class NormalizeVecObservation(JaxEnvWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+    def reset(self, key: chex.PRNGKey):
+        obs, state = self._env.reset(key)
+        state = NormalizeVecObsEnvState(
+            mean=jnp.zeros_like(obs),
+            var=jnp.ones_like(obs),
+            count=1e-4,
+            env_state=state,
+        )
+        batch_mean = jnp.mean(obs, axis=0)
+        batch_var = jnp.var(obs, axis=0)
+        batch_count = obs.shape[0]
+
+        delta = batch_mean - state.mean
+        tot_count = state.count + batch_count
+
+        new_mean = state.mean + delta * batch_count / tot_count
+        m_a = state.var * state.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + jnp.square(delta) * state.count * batch_count / tot_count
+        new_var = M2 / tot_count
+        new_count = tot_count
+
+        state = NormalizeVecObsEnvState(
+            mean=new_mean,
+            var=new_var,
+            count=new_count,
+            env_state=state.env_state,
+        )
+
+        return (obs - state.mean) / jnp.sqrt(state.var + 1e-8), state
+
+    def step(self, key: chex.PRNGKey, state: NormalizeVecObsEnvState, action):
+        timestep, env_state = self._env.step(
+            key, state.env_state, action
+        )
+        obs = timestep.observation
+
+        batch_mean = jnp.mean(obs, axis=0)
+        batch_var = jnp.var(obs, axis=0)
+        batch_count = obs.shape[0]
+
+        delta = batch_mean - state.mean
+        tot_count = state.count + batch_count
+
+        new_mean = state.mean + delta * batch_count / tot_count
+        m_a = state.var * state.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + jnp.square(delta) * state.count * batch_count / tot_count
+        new_var = M2 / tot_count
+        new_count = tot_count
+
+        state = NormalizeVecObsEnvState(
+            mean=new_mean,
+            var=new_var,
+            count=new_count,
+            env_state=env_state,
+        )
+        return TimeStep(
+            (obs - state.mean) / jnp.sqrt(state.var + 1e-8),
+            timestep.reward,
+            timestep.terminated,
+            timestep.truncated,
+            timestep.info,
+        ), state
+

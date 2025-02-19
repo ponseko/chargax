@@ -20,6 +20,7 @@ class ChargersState(eqx.Module):
     car_battery_now_kw: chex.Array
     car_battery_capacity_kw: chex.Array
     car_desired_battery_percentage: chex.Array
+    car_arrival_battery_kw: chex.Array # To compensate / block the agent from discharging further than the arrival battery
     charge_sensitive: chex.Array # False = Time sensitive
 
     # we need to keep track of the discharging per EV
@@ -45,7 +46,7 @@ class ChargersState(eqx.Module):
     
     @property
     def car_battery_desired_remaining(self) -> jnp.ndarray:
-        return jnp.maximum(0, self.car_desired_battery_percentage - self.car_battery_percentage)
+        return self.car_desired_battery_percentage - self.car_battery_percentage
     
     @property
     def charger_output_now_kw(self) -> jnp.ndarray:
@@ -264,7 +265,7 @@ class StationBattery(eqx.Module):
     A battery for the hub. Can be used to store excess energy or to provide energy to the grid.
     """
     capacity_kw: float = 100000.0
-    battery_now: float = 200.0
+    battery_now: float = 0.0
     max_rate_kw: float = 1000.0
 
     @property

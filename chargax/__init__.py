@@ -1,4 +1,4 @@
-from .environment.base_and_wrappers import JaxBaseEnv, TimeStep, LogWrapper
+from .environment.base_and_wrappers import JaxBaseEnv, TimeStep, LogWrapper, NormalizeVecObservation
 from .environment.states import EnvState, StationSplitter, ChargersState, ChargingStation
 from .environment.spaces import Discrete, MultiDiscrete, Box
 from .environment.chargax import Chargax

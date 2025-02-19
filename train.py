@@ -84,7 +84,7 @@ def create_baseline_rewards(env: Chargax, num_iterations=100):
         done = jnp.logical_or(terminated, truncated)
         return (rng, obs, env_state, done, episode_reward), info
 
-    env = eqx.tree_at(lambda x: x.full_info_dict, env, True)
+    # env = eqx.tree_at(lambda x: x.full_info_dict, env, True)
     baseline_rewards = {}
     rng = jax.random.PRNGKey(0)
     rng, reset_key = jax.random.split(rng)
@@ -105,7 +105,7 @@ def create_baseline_rewards(env: Chargax, num_iterations=100):
                 length=env.episode_length
             )
             baseline_rewards[method]["episode_rewards"].append(episode_reward)
-            baseline_rewards[method]["profit"].append(info["profit"][-1])
+            baseline_rewards[method]["profit"].append(info["logging_data"]["profit"][-1])
 
     baseline_rewards = {
         k: {
@@ -144,7 +144,7 @@ if __name__ == "__main__":
 
     env = Chargax(
         elec_grid_buy_price=get_electricity_prices(),
-        elec_grid_sell_price=get_electricity_prices() - 0.03,
+        elec_grid_sell_price=get_electricity_prices(),
         **env_parameters
     )
 

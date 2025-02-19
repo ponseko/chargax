@@ -16,6 +16,7 @@ dependencies = [
     "equinox",
     "distrax",
     "chex",
+    "optax",
 ]
 
 [project.urls]

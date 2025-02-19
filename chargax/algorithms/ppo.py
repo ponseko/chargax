@@ -6,7 +6,7 @@ import optax
 from typing import NamedTuple, List
 from dataclasses import replace
 
-from chargax import Chargax, LogWrapper
+from chargax import Chargax, LogWrapper, NormalizeVecObservation
 from chargax.algorithms.networks import ActorNetworkMultiDiscrete, CriticNetwork
 import wandb
 
@@ -35,9 +35,9 @@ class PPOConfig:
     ent_coef: float = 0.01
     vf_coef: float = 0.25
 
-    total_timesteps: int = 3e6
-    num_envs: int = 6
-    num_steps: int = 256 # steps per environment
+    total_timesteps: int = 5e6
+    num_envs: int = 12
+    num_steps: int = 300 # steps per environment
     num_minibatches: int = 4 # Number of mini-batches
     update_epochs: int = 4 # K epochs to update the policy
 
@@ -84,6 +84,7 @@ def build_ppo_trainer(
 
     # setup env (wrappers) and config
     env = LogWrapper(env)
+    env = NormalizeVecObservation(env)
     # env = FlattenObservationWrapper(env)
     observation_space = env.observation_space
     action_space = env.action_space
@@ -352,7 +353,7 @@ def build_ppo_trainer(
             jax.debug.callback(callback, metric)
 
             runner_state = (train_state, env_state, last_obs, rng)
-            return runner_state, metric 
+            return runner_state, _ 
 
         rng, key = jax.random.split(rng)
         runner_state = (train_state, env_state, obsv, key)
