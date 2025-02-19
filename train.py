@@ -121,6 +121,7 @@ if __name__ == "__main__":
     argument_parser.add_argument("--seed", type=int, default=42)
     argument_parser.add_argument("--user_profiles", type=str, choices=["highway", "residential", "workplace", "shopping"], required=True)
     argument_parser.add_argument("--arrival_frequency", type=str, choices=["low", "medium", "high"], required=True)
+    argument_parser.add_argument("--groupname", type=str, default=None)
     args, extra_args = argument_parser.parse_known_args()
 
     # Convert extra_args to a dictionary. we assume that they set environment parameters.
@@ -169,7 +170,7 @@ if __name__ == "__main__":
     print(
         f"JAX compilation finished in {(time.time() - start_time):.2f} seconds, starting training..."
     )
-    groupname = args.user_profiles + "_" + args.arrival_frequency
+    groupname = args.groupname if args.groupname else args.user_profiles + "_" + args.arrival_frequency
     c_time = time.time()
     wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__, group=groupname)
     trained_runner_state, train_rewards = random_trainer_train_fn()
