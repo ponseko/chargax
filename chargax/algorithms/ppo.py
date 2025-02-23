@@ -101,8 +101,8 @@ def build_ppo_trainer(
     actor, critic = create_ppo_networks(
         key=network_key, 
         in_shape=observation_space.shape[0],
-        actor_features=[64, 64], 
-        critic_features=[64, 64], 
+        actor_features=[256, 256], 
+        critic_features=[256, 256], 
         actions_nvec=action_space.nvec
     )
 

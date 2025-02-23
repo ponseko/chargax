@@ -47,7 +47,12 @@ class ChargersState(eqx.Module):
     @property
     def car_battery_desired_remaining(self) -> jnp.ndarray:
         return self.car_desired_battery_percentage - self.car_battery_percentage
-    
+
+    @property
+    def car_battery_desired_remaining_kw(self) -> jnp.ndarray:
+        desired_battery_kw = self.car_desired_battery_percentage * self.car_battery_capacity_kw
+        return desired_battery_kw - self.car_battery_now_kw
+
     @property
     def charger_output_now_kw(self) -> jnp.ndarray:
         return (self.charger_voltage * self.charger_current_now) / 1000.0
@@ -281,7 +286,7 @@ class ChargingStation(eqx.Module):
     """
     charger_layout: StationSplitter
 
-    def __init__(self, num_chargers: int = 16, num_chargers_per_group: int = 2, num_dc_groups: int = 4):
+    def __init__(self, num_chargers: int = 16, num_chargers_per_group: int = 2, num_dc_groups: int = 5):
         assert num_chargers % num_chargers_per_group == 0, "Chargers must be divisible by chargers_per_group"
         assert num_chargers_per_group >= 1, "Chargers per group must be greater than 0"
         assert num_chargers > num_chargers_per_group, "Chargers must be greater than chargers_per_group"
@@ -346,6 +351,7 @@ class EnvState:
     # Reward variables
     profit: float = 0.0
     uncharged_percentages: float = 0.0
+    uncharged_kw: float = 0.0
     charged_overtime: int = 0 # Minutes over the desired charge time
     charged_undertime: int = 0 # Minutes under the desired charge time (positive reward)
     rejected_customers: int = 0
@@ -353,4 +359,3 @@ class EnvState:
     exceeded_capacity: float = 0.0
     total_charged_kw: float = 0.0
     total_discharged_kw: float = 0.0
-

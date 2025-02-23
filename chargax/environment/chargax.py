@@ -37,6 +37,7 @@ class Chargax(JaxBaseEnv):
     time_satisfaction_alpha: float = 0.0
     rejected_customers_alpha: float = 0.0
     battery_degredation_alpha: float = 0.0
+    beta: float = 0.0
 
     # Env options:
     num_discretization_levels: int = 10 # 10 would mean each charger can charge 10%, 20%, ... of its max rate
@@ -289,6 +290,7 @@ class Chargax(JaxBaseEnv):
         ) * state.chargers_state.charger_is_car_connected
 
         uncharged_percentages = (cars_leaving * jnp.maximum(0, state.chargers_state.car_battery_desired_remaining)).sum()
+        uncharged_kw = (cars_leaving * jnp.maximum(0, state.chargers_state.car_battery_desired_remaining_kw)).sum()
         
         charged_overtime = jnp.abs(
             cars_leaving * jnp.minimum(
@@ -320,6 +322,7 @@ class Chargax(JaxBaseEnv):
                 charger_is_car_connected=car_connected,
             ),
             uncharged_percentages=state.uncharged_percentages + uncharged_percentages,
+            uncharged_kw=state.uncharged_kw + uncharged_kw,
             charged_overtime=state.charged_overtime + charged_overtime,
             charged_undertime=state.charged_undertime + charged_undertime,
             left_customers=state.left_customers + cars_leaving.sum(),
@@ -398,19 +401,30 @@ class Chargax(JaxBaseEnv):
             connection_times_rnd = jax.random.randint(keys[0], (self.station.num_chargers,), 0, 101)
             energy_demands_rnd = jax.random.randint(keys[1], (self.station.num_chargers,), 0, 101)
             car_time_till_leave = connection_times[connection_times_rnd].astype(int)
+
             energy_demands = energy_demands[energy_demands_rnd]
-            current_batteries = chargers_state.car_battery_capacity_kw - energy_demands
+            car_desired_battery_percentage = jax.random.uniform(keys[2], (self.station.num_chargers,), minval=0.8, maxval=0.95)
+            car_desired_kw = chargers_state.car_battery_capacity_kw * car_desired_battery_percentage
+            car_battery_now_kw = car_desired_kw - energy_demands
             car_battery_now_kw = jnp.clip(
-                current_batteries,
+                car_battery_now_kw,
                 0.03 * chargers_state.car_battery_capacity_kw,
                 chargers_state.car_battery_capacity_kw
             )
 
-            car_desired_battery_percentage = jax.random.uniform(keys[2], (self.station.num_chargers,), minval=0.8, maxval=0.95)
-            car_desired_battery_percentage = jnp.maximum(
-                car_desired_battery_percentage,
-                chargers_state.car_battery_percentage # users can't desire less than what they have
-            )
+            
+            # current_batteries = chargers_state.car_battery_capacity_kw - energy_demands
+            # car_battery_now_kw = jnp.clip(
+            #     current_batteries,
+            #     0.03 * chargers_state.car_battery_capacity_kw,
+            #     chargers_state.car_battery_capacity_kw
+            # )
+
+            # car_desired_battery_percentage = jax.random.uniform(keys[2], (self.station.num_chargers,), minval=0.8, maxval=0.95)
+            # car_desired_battery_percentage = jnp.maximum(
+            #     car_desired_battery_percentage,
+            #     chargers_state.car_battery_percentage # users can't desire less than what they have
+            # )
             if self.user_profiles == "highway":
                 charge_sensitive = jax.random.bernoulli(keys[2], 0.9, shape=(self.station.num_chargers,))
             else:
@@ -499,7 +513,8 @@ class Chargax(JaxBaseEnv):
     def get_reward(self, old_state: EnvState, new_state: EnvState) -> chex.Array:
         profit_delta = new_state.profit - old_state.profit
         
-        uncharged_delta = new_state.uncharged_percentages - old_state.uncharged_percentages
+        # uncharged_delta = new_state.uncharged_percentages - old_state.uncharged_percentages
+        uncharged_delta = new_state.uncharged_kw - old_state.uncharged_kw
         charged_overtime_delta = new_state.charged_overtime - old_state.charged_overtime
         charged_undertime_delta = new_state.charged_undertime - old_state.charged_undertime
         rejected_customers_delta = new_state.rejected_customers - old_state.rejected_customers
@@ -508,7 +523,7 @@ class Chargax(JaxBaseEnv):
 
         return profit_delta - (
               self.charged_satisfaction_alpha * uncharged_delta
-            + self.time_satisfaction_alpha * (charged_overtime_delta - charged_undertime_delta)
+            + self.time_satisfaction_alpha * (charged_overtime_delta - (self.beta * charged_undertime_delta))
             + self.rejected_customers_alpha * rejected_customers_delta
             + self.capacity_exceeded_alpha * exceeded_capacity_delta
             + self.battery_degredation_alpha * battery_degredation_delta
@@ -530,6 +545,7 @@ class Chargax(JaxBaseEnv):
                     "total_discharged_kw": state.total_discharged_kw,
                     "rejected_customers": state.rejected_customers,
                     "uncharged_percentages" : state.uncharged_percentages,
+                    "uncharged_kw" : state.uncharged_kw,
                     "charged_overtime": state.charged_overtime,
                     "charged_undertime": state.charged_undertime,
                     "battery_level": state.battery_state.battery_now,

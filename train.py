@@ -91,29 +91,71 @@ def create_baseline_rewards(env: Chargax, num_iterations=100):
     obs, env_state = env.reset(reset_key)
     for method in ["random_actions", "maximum_actions"]:
         baseline_rewards[method] = {
-            "episode_rewards": [],
-            "profit": []
+            "episode_rewards": np.zeros(num_iterations),
+            "profit": np.zeros(num_iterations),
+            "exceeded_capacity": np.zeros(num_iterations),
+            "total_charged_kw": np.zeros(num_iterations),
+            "total_discharged_kw": np.zeros(num_iterations),
+            "rejected_customers": np.zeros(num_iterations),
+            "uncharged_percentages": np.zeros(num_iterations),
+            "uncharged_kw": np.zeros(num_iterations),
+            "charged_overtime": np.zeros(num_iterations),
+            "charged_undertime": np.zeros(num_iterations),
         }
         if method == "random_actions":
             step_env = step_env_random
         elif method == "maximum_actions":
             step_env = step_env_max
-        for _ in range(num_iterations):
+        for i in range(num_iterations):
             (rng, obs, env_state, done, episode_reward), info = jax.lax.scan(
                 step_env, 
                 (rng, obs, env_state, False, 0.0), 
                 length=env.episode_length
             )
-            baseline_rewards[method]["episode_rewards"].append(episode_reward)
-            baseline_rewards[method]["profit"].append(info["logging_data"]["profit"][-1])
-
-    baseline_rewards = {
-        k: {
-            "episode_rewards": np.mean(v["episode_rewards"]),
-            "profit": np.mean(v["profit"])
-        } for k, v in baseline_rewards.items()
-    }
+            baseline_rewards[method]["episode_rewards"][i] = episode_reward
+            baseline_rewards[method]["profit"][i] = info["logging_data"]["profit"][-1]
+            baseline_rewards[method]["exceeded_capacity"][i] = info["logging_data"]["exceeded_capacity"][-1]
+            baseline_rewards[method]["total_charged_kw"][i] = info["logging_data"]["total_charged_kw"][-1]
+            baseline_rewards[method]["total_discharged_kw"][i] = info["logging_data"]["total_discharged_kw"][-1]
+            baseline_rewards[method]["rejected_customers"][i] = info["logging_data"]["rejected_customers"][-1]
+            baseline_rewards[method]["uncharged_percentages"][i] = info["logging_data"]["uncharged_percentages"][-1]
+            baseline_rewards[method]["uncharged_kw"][i] = info["logging_data"]["uncharged_kw"][-1]
+            baseline_rewards[method]["charged_overtime"][i] = info["logging_data"]["charged_overtime"][-1]
+            baseline_rewards[method]["charged_undertime"][i] = info["logging_data"]["charged_undertime"][-1]
+    baseline_rewards = jax.tree.map(
+        lambda x: np.mean(x), baseline_rewards
+    )
     return baseline_rewards
+
+def validate_on_elec_data(train_state, rng, elec_data, num_reps):
+
+    def step_env(carry, _):
+        rng, obs, env_state, done, episode_reward = carry
+        rng, action_key, step_key = jax.random.split(rng, 3)
+        action_dist = train_state.actor(obs)
+        action = action_dist.sample(seed=action_key)
+        (obs, reward, terminated, truncated, info), env_state = env.step(step_key, env_state, action)
+        done = jnp.logical_or(terminated, truncated)
+        episode_reward += reward
+        return (rng, obs, env_state, done, episode_reward), info
+
+    env = Chargax(
+        elec_grid_buy_price=get_electricity_prices(elec_data),
+        elec_grid_sell_price=get_electricity_prices(elec_data) - 0.05,
+    )
+    ep_rewards = []
+    for _ in range(num_reps):
+        episode_reward = 0.0
+        for day in range(365):
+            rng, reset_key = jax.random.split(rng)
+            obs, env_state = env.reset(reset_key)
+            done = False
+            runner_state = (rng, obs, env_state, done, episode_reward)
+            runner_state, infos = jax.lax.scan(step_env, runner_state, length=env.episode_length)
+        episode_reward = episode_reward / 365
+        ep_rewards.append(episode_reward)
+    return ep_rewards
+
 
 if __name__ == "__main__":
 
@@ -122,6 +164,7 @@ if __name__ == "__main__":
     argument_parser.add_argument("--user_profiles", type=str, choices=["highway", "residential", "workplace", "shopping"], required=True)
     argument_parser.add_argument("--arrival_frequency", type=str, choices=["low", "medium", "high"], required=True)
     argument_parser.add_argument("--groupname", type=str, default=None)
+    argument_parser.add_argument("--runtag", type=str, default=None)
     args, extra_args = argument_parser.parse_known_args()
 
     # Convert extra_args to a dictionary. we assume that they set environment parameters.
@@ -147,8 +190,8 @@ if __name__ == "__main__":
         env_parameters[key] = value
 
     env = Chargax(
-        elec_grid_buy_price=get_electricity_prices(),
-        elec_grid_sell_price=get_electricity_prices(),
+        elec_grid_buy_price=get_electricity_prices("2023_NL"),
+        elec_grid_sell_price=get_electricity_prices("2023_NL") - 0.02,
         user_profiles=args.user_profiles,
         arrival_frequency=args.arrival_frequency,
         **env_parameters
@@ -171,8 +214,10 @@ if __name__ == "__main__":
         f"JAX compilation finished in {(time.time() - start_time):.2f} seconds, starting training..."
     )
     groupname = args.groupname if args.groupname else args.user_profiles + "_" + args.arrival_frequency
+    env_parameters_str = "_".join([f"{k}_{v}" for k, v in env_parameters.items()])
+    groupname = f"{groupname}_{env_parameters_str}"
     c_time = time.time()
-    wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__, group=groupname)
+    wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__, group=groupname, tags=[args.runtag])
     trained_runner_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
     print(f"Training took {time.time() - c_time:.2f} seconds")
