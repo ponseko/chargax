@@ -30,6 +30,9 @@ class Chargax(JaxBaseEnv):
 
     # Station:
     station: ChargingStation = ChargingStation()
+    num_chargers: int = 16
+    num_chargers_per_group: int = 2
+    num_dc_groups: int = 5
 
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
@@ -68,6 +71,13 @@ class Chargax(JaxBaseEnv):
         arrival_data_workdays, arrival_data_weekends, _, _ = get_scenario(self.user_profiles, average_cars_per_day=arrival_frequency, minutes_per_timestep=self.minutes_per_timestep)
         self.__setattr__("ev_arrival_means_workdays", pre_sample_data(arrival_data_workdays, num_samples=(10000 // 7) * 5))
         self.__setattr__("ev_arrival_means_non_workdays", pre_sample_data(arrival_data_weekends, num_samples=(10000 // 7) * 2))
+
+        station = ChargingStation(
+            num_chargers=self.num_chargers, 
+            num_chargers_per_group=self.num_chargers_per_group, 
+            num_dc_groups=self.num_dc_groups
+        )
+        self.__setattr__("station", station)
 
         # self.__setattr__("some_property", some_property_value)
 

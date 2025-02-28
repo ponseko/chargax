@@ -165,6 +165,8 @@ if __name__ == "__main__":
     argument_parser.add_argument("--arrival_frequency", type=str, choices=["low", "medium", "high"], required=True)
     argument_parser.add_argument("--groupname", type=str, default=None)
     argument_parser.add_argument("--runtag", type=str, default=None)
+    argument_parser.add_argument("--car_profiles", type=str, default="eu")
+    argument_parser.add_argument("--num_dc_groups", type=int, default=None)
     args, extra_args = argument_parser.parse_known_args()
 
     # Convert extra_args to a dictionary. we assume that they set environment parameters.
@@ -194,6 +196,8 @@ if __name__ == "__main__":
         elec_grid_sell_price=get_electricity_prices("2023_NL") - 0.02,
         user_profiles=args.user_profiles,
         arrival_frequency=args.arrival_frequency,
+        car_profiles=args.car_profiles,
+        num_dc_groups=args.num_dc_groups,
         **env_parameters
     )
 
@@ -207,17 +211,27 @@ if __name__ == "__main__":
         baselines=baselines
     )#, {"num_envs": 1, "total_timesteps": 1000})
 
+    filtered_env_dict = {
+        k: v for k, v in env.__dict__.items() if not isinstance(v, chex.Array)
+    }
+    merged_config = {
+        **filtered_env_dict,
+        **config.__dict__
+    }
+
     start_time = time.time()
     print("Starting JAX compilation...")
     random_trainer_train_fn = jax.jit(random_trainer_train_fn).lower().compile()
     print(
         f"JAX compilation finished in {(time.time() - start_time):.2f} seconds, starting training..."
     )
-    groupname = args.groupname if args.groupname else args.user_profiles + "_" + args.arrival_frequency
+    groupname = args.groupname if args.groupname else args.user_profiles + "_" + args.arrival_frequency + args.car_profiles
+    if args.num_dc_groups is not None:
+        groupname += "_" + str(args.num_dc_groups)
     env_parameters_str = "_".join([f"{k}_{v}" for k, v in env_parameters.items()])
     groupname = f"{groupname}_{env_parameters_str}"
     c_time = time.time()
-    wandb.init(project="chargax", entity="FelixAndKoen", config=config.__dict__, group=groupname, tags=[args.runtag])
+    wandb.init(project="chargax", entity="FelixAndKoen", config=merged_config, group=groupname, tags=[args.runtag], dir="/var/scratch/kponse/wandb")
     trained_runner_state, train_rewards = random_trainer_train_fn()
     print("Training finished")
     print(f"Training took {time.time() - c_time:.2f} seconds")

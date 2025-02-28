@@ -272,6 +272,7 @@ class StationBattery(eqx.Module):
     capacity_kw: float = 100000.0
     battery_now: float = 0.0
     max_rate_kw: float = 1000.0
+    tau: float = 1.0
 
     @property
     def battery_percentage(self) -> float:
