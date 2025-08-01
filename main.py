@@ -1,9 +1,7 @@
-import time
-from functools import partial
-
 import jax
 import jymkit as jym
 import numpy as np
+import optax
 from jymkit.algorithms import PPO
 
 from chargax import Chargax, get_electricity_prices  # noqa: E402
@@ -17,13 +15,20 @@ if __name__ == "__main__":
     rng = jax.random.PRNGKey(42)
 
     # RL Training with PPO
-    agent = PPO()
+    num_envs = 4
+    num_steps = 300
+    total_timesteps = 1_000_000
+    num_epochs = 4
+    num_training_iterations = (total_timesteps // num_steps // num_envs) * num_epochs
+    agent = PPO(  # Not optimized, just a simple example
+        num_steps=num_steps,
+        num_envs=num_envs,
+        num_epochs=num_epochs,
+        total_timesteps=total_timesteps,
+        learning_rate=optax.linear_schedule(2.5e-3, 2.5e-5, num_training_iterations),
+    )
 
-    s_time = time.time()
-    print("Start JAX compilation...")
-    train_fn = jax.jit(partial(agent.train, rng, env)).lower().compile()
-    print("JAX compilation finished, took {:.2f} seconds".format(time.time() - s_time))
-    agent: PPO = train_fn()
+    agent: PPO = agent.train(rng, env)
 
     results = agent.evaluate(rng, env, num_eval_episodes=25)
     print(f"Average reward over 25 evaluation episodes: {np.mean(results)}")

@@ -556,41 +556,18 @@ class Chargax(jym.Environment):
             )
 
         timesteps_per_hour = 60 // self.minutes_per_timestep
-        price_now = self.elec_grid_buy_price[state.day_of_year][state.timestep]
-        price_plus_1 = self.elec_grid_buy_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour)
-        ]
-        price_plus_2 = self.elec_grid_buy_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 2)
-        ]
-        price_plus_3 = self.elec_grid_buy_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 3)
-        ]
-        price_plus_4 = self.elec_grid_buy_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 4)
-        ]
-        price_plus_5 = self.elec_grid_buy_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 5)
-        ]
-        price_diff_next = price_plus_1 - price_now
 
-        sell_price_now = self.elec_grid_sell_price[state.day_of_year][state.timestep]
-        sell_price_plus_1 = self.elec_grid_sell_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour)
-        ]
-        sell_price_plus_2 = self.elec_grid_sell_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 2)
-        ]
-        sell_price_plus_3 = self.elec_grid_sell_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 3)
-        ]
-        sell_price_plus_4 = self.elec_grid_sell_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 4)
-        ]
-        sell_price_plus_5 = self.elec_grid_sell_price[state.day_of_year][
-            (state.timestep + timesteps_per_hour * 5)
-        ]
-        price_diff_next_sell = sell_price_plus_1 - sell_price_now
+        # Get price data for current and next 5 hours using vectorized operations
+        hour_offsets = jnp.arange(6) * timesteps_per_hour  # [0, 1h, 2h, 3h, 4h, 5h]
+        timestep_indices = state.timestep + hour_offsets
+
+        # Get buy and sell prices for all time periods at once
+        buy_prices = self.elec_grid_buy_price[state.day_of_year][timestep_indices]
+        sell_prices = self.elec_grid_sell_price[state.day_of_year][timestep_indices]
+
+        # Calculate price differences for all lookahead periods
+        price_diffs_buy = buy_prices[1:] - buy_prices[0]  # all diffs from now
+        price_diffs_sell = sell_prices[1:] - sell_prices[0]  # ""
 
         observations = jnp.concatenate(
             [
@@ -600,22 +577,12 @@ class Chargax(jym.Environment):
                         state.timestep,
                         state.day_of_year,
                         state.is_workday,
-                        price_now,
-                        price_plus_1,
-                        price_plus_2,
-                        price_plus_3,
-                        price_plus_4,
-                        price_plus_5,
-                        sell_price_now,
-                        sell_price_plus_1,
-                        sell_price_plus_2,
-                        sell_price_plus_3,
-                        sell_price_plus_4,
-                        sell_price_plus_5,
-                        price_diff_next,
-                        price_diff_next_sell,
                     ]
                 ),
+                buy_prices,
+                sell_prices,
+                price_diffs_buy,
+                price_diffs_sell,
             ]
         )
 

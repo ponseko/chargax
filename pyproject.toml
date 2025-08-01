@@ -1,13 +1,13 @@
 [project]
 name = "chargax"
-version = "0.2.0"
+version = "0.2.1"
 description = "A JAX Accelerated EV Charging Simulator"
 readme = "README.md"
 authors = [
     { name = "Koen Ponse", email = "k.ponse@liacs.leidenuniv.nl" }
 ]
-requires-python = ">=3.10"
-dependencies = ['jymkit[algs]>=0.0.10']
+requires-python = ">=3.11"
+dependencies = ['jymkit[algs]>=0.0.14']
 
 [build-system]
 requires = ["hatchling"]
