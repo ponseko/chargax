@@ -166,7 +166,7 @@ if __name__ == "__main__":
     argument_parser.add_argument("--groupname", type=str, default=None)
     argument_parser.add_argument("--runtag", type=str, default=None)
     argument_parser.add_argument("--car_profiles", type=str, default="eu")
-    argument_parser.add_argument("--num_dc_groups", type=int, default=None)
+    argument_parser.add_argument("--num_dc_groups", type=int, default=5)
     args, extra_args = argument_parser.parse_known_args()
 
     # Convert extra_args to a dictionary. we assume that they set environment parameters.
