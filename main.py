@@ -1,7 +1,6 @@
 import jax
 import jaxnasium as jym
 import numpy as np
-import optax
 from jaxnasium.algorithms import PPO
 
 from chargax import Chargax, get_electricity_prices  # noqa: E402
@@ -25,7 +24,8 @@ if __name__ == "__main__":
         num_envs=num_envs,
         num_epochs=num_epochs,
         total_timesteps=total_timesteps,
-        learning_rate=optax.linear_schedule(2.5e-3, 2.5e-5, num_training_iterations),
+        learning_rate=2.5e-3,
+        anneal_learning_rate=True,
     )
 
     agent: PPO = agent.train(rng, env)
