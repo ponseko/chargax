@@ -1,13 +1,13 @@
 [project]
 name = "chargax"
-version = "0.2.1"
+version = "0.2.2"
 description = "A JAX Accelerated EV Charging Simulator"
 readme = "README.md"
 authors = [
     { name = "Koen Ponse", email = "k.ponse@liacs.leidenuniv.nl" }
 ]
 requires-python = ">=3.11"
-dependencies = ['jaxnasium[algs]>=0.0.23']
+dependencies = ['jaxnasium[algs]>=0.0.26']
 
 [build-system]
 requires = ["hatchling"]
@@ -15,7 +15,7 @@ build-backend = "hatchling.build"
 
 [tool.ruff.lint]
 extend-select = ["I"]
-ignore = ["F722", "E731"] 
+ignore = ["F722", "E731"]
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
