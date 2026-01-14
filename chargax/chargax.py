@@ -55,10 +55,10 @@ class Chargax(jym.Environment):
     arrival_frequency: int | Literal["low", "medium", "high"] = 100
 
     # Station:
-    station: ChargingStation = ChargingStation()
-    num_chargers: int = 16
-    num_chargers_per_group: int = 2
-    num_dc_groups: int = 5
+    station: ChargingStation = None
+    num_chargers: int = 16  # Used if station is None
+    num_chargers_per_group: int = 2  # Used if station is None
+    num_dc_groups: int = 5  # Used if station is None
 
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
@@ -113,12 +113,13 @@ class Chargax(jym.Environment):
             pre_sample_data(arrival_data_weekends, num_samples=(10000 // 7) * 2),
         )
 
-        station = ChargingStation(
-            num_chargers=self.num_chargers,
-            num_chargers_per_group=self.num_chargers_per_group,
-            num_dc_groups=self.num_dc_groups,
-        )
-        self.__setattr__("station", station)
+        if self.station is None:
+            station = ChargingStation(
+                num_chargers=self.num_chargers,
+                num_chargers_per_group=self.num_chargers_per_group,
+                num_dc_groups=self.num_dc_groups,
+            )
+            self.__setattr__("station", station)
 
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
         day_of_year = jax.random.randint(
