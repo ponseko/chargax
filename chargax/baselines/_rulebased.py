@@ -12,7 +12,11 @@ class MaxCharge(eqx.Module):
     state: None = None  # Placeholder for compatibility
 
     def get_action(self, key: PRNGKeyArray, **kwargs) -> float:
-        return self.env.action_space.sample(key)
+        MAX_ACTION = self.env.action_space.nvec.max()
+        action = np.ones_like(self.env.action_space.nvec) * MAX_ACTION
+        if self.env.include_battery:
+            action[-1] = 0.0  # Maximum discharge for the battery
+        return action
 
 
 class Random(eqx.Module):
@@ -22,8 +26,4 @@ class Random(eqx.Module):
     state: None = None  # Placeholder for compatibility
 
     def get_action(self, key: PRNGKeyArray, **kwargs) -> float:
-        MAX_ACTION = self.env.action_space.nvec.max()
-        action = np.ones_like(self.env.action_space.nvec) * MAX_ACTION
-        if self.env.include_battery:
-            action[-1] = 0.0  # Maximum discharge for the battery
-        return action
+        return self.env.action_space.sample(key)
