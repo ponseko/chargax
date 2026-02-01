@@ -344,6 +344,9 @@ class Chargax(jym.Environment):
         car_time_till_leave = (
             state.chargers_state.car_time_till_leave - self.minutes_per_timestep
         )
+        car_time_waited = (
+            state.chargers_state.car_time_waited + self.minutes_per_timestep
+        )
 
         time_sensitive_leaving = jnp.logical_and(
             car_time_till_leave <= 0, ~state.chargers_state.charge_sensitive
@@ -383,6 +386,7 @@ class Chargax(jym.Environment):
             chargers_state=replace(
                 state.chargers_state,
                 car_time_till_leave=car_time_till_leave,
+                car_time_waited=car_time_waited,
                 charger_is_car_connected=car_connected,
             ),
             uncharged_percentages=state.uncharged_percentages + uncharged_percentages,
@@ -518,42 +522,36 @@ class Chargax(jym.Environment):
         charger_state = state.chargers_state
         battery_state = state.battery_state
 
-        observations = jnp.concatenate(
-            [
-                charger_state.car_time_till_leave,
-                charger_state.car_battery_now_kw,
-                charger_state.car_battery_capacity_kw,
-                # charger_state.car_desired_battery_percentage,
-                charger_state.charge_sensitive,
-                charger_state.car_battery_percentage,
-                charger_state.car_battery_desired_remaining,
-                charger_state.car_max_current_intake,
-                charger_state.car_max_current_outtake,
-                charger_state.car_discharged_this_session_kw,
-                charger_state.car_arrival_battery_kw,
-                state.chargers_state.car_battery_now_kw
-                < state.chargers_state.car_arrival_battery_kw,
-                state.chargers_state.car_arrival_battery_kw
-                - state.chargers_state.car_battery_now_kw,
-                charger_state.car_ac_absolute_max_charge_rate_kw,
-                charger_state.car_ac_optimal_charge_threshold,
-                charger_state.car_dc_absolute_max_charge_rate_kw,
-                charger_state.car_dc_optimal_charge_threshold,
-                charger_state.charger_output_now_kw,
-            ]
-        )
+        observations = {
+            "car_time_till_leave": charger_state.car_time_till_leave,
+            "car_time_waited": charger_state.car_time_waited,
+            "car_battery_now_kw": charger_state.car_battery_now_kw,
+            "car_battery_capacity_kw": charger_state.car_battery_capacity_kw,
+            # "car_desired_battery_percentage": charger_state.car_desired_battery_percentage,
+            "car_is_charge_sensitive": charger_state.charge_sensitive,
+            "car_battery_percentage": charger_state.car_battery_percentage,
+            "car_battery_desired_remaining": charger_state.car_battery_desired_remaining,
+            "car_max_current_intake": charger_state.car_max_current_intake,
+            "car_max_current_outtake": charger_state.car_max_current_outtake,
+            "car_discharged_this_session_kw": charger_state.car_discharged_this_session_kw,
+            "car_arrival_battery_kw": charger_state.car_arrival_battery_kw,
+            "car_less_then_arrival": state.chargers_state.car_battery_now_kw
+            < state.chargers_state.car_arrival_battery_kw,
+            "car_arrival_battery_deficit_kw": state.chargers_state.car_arrival_battery_kw
+            - state.chargers_state.car_battery_now_kw,
+            "car_ac_absolute_max_charge_rate_kw": charger_state.car_ac_absolute_max_charge_rate_kw,
+            "car_ac_optimal_charge_threshold": charger_state.car_ac_optimal_charge_threshold,
+            "car_dc_absolute_max_charge_rate_kw": charger_state.car_dc_absolute_max_charge_rate_kw,
+            "car_dc_optimal_charge_threshold": charger_state.car_dc_optimal_charge_threshold,
+            "charger_output_now_kw": charger_state.charger_output_now_kw,
+        }
         if self.include_battery:
-            observations = jnp.concatenate(
-                [
-                    observations,
-                    jnp.array(
-                        [
-                            battery_state.battery_now,
-                            battery_state.battery_percentage,
-                            battery_state.max_rate_kw,
-                        ]
-                    ),
-                ]
+            observations.update(
+                {
+                    "station_battery_now_kw": battery_state.battery_now,
+                    "station_battery_percentage": battery_state.battery_percentage,
+                    "station_battery_max_rate_kw": battery_state.max_rate_kw,
+                }
             )
 
         timesteps_per_hour = 60 // self.minutes_per_timestep
@@ -570,21 +568,16 @@ class Chargax(jym.Environment):
         price_diffs_buy = buy_prices[1:] - buy_prices[0]  # all diffs from now
         price_diffs_sell = sell_prices[1:] - sell_prices[0]  # ""
 
-        observations = jnp.concatenate(
-            [
-                observations,
-                jnp.array(
-                    [
-                        state.timestep,
-                        state.day_of_year,
-                        state.is_workday,
-                    ]
-                ),
-                buy_prices,
-                sell_prices,
-                price_diffs_buy,
-                price_diffs_sell,
-            ]
+        observations.update(
+            {
+                "buy_prices_next_5_hours": buy_prices,
+                "sell_prices_next_5_hours": sell_prices,
+                "price_diffs_buy_next_5_hours": price_diffs_buy,
+                "price_diffs_sell_next_5_hours": price_diffs_sell,
+                "current_timestep": state.timestep,
+                "current_day_of_year": state.day_of_year,
+                "is_workday": state.is_workday,
+            }
         )
 
         return observations
@@ -660,7 +653,7 @@ class Chargax(jym.Environment):
     @property
     def observation_space(self):
         obs, _ = self.reset_env(jax.random.PRNGKey(0))
-        return jym.Box(-1, 1, obs.shape)
+        return {k: jym.Box(-1, 1, getattr(v, "shape", ())) for k, v in obs.items()}
 
     @property
     def action_space(self) -> jym.Space:

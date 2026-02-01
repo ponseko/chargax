@@ -1,6 +1,6 @@
 [project]
 name = "chargax"
-version = "0.2.2"
+version = "0.3.0"
 description = "A JAX Accelerated EV Charging Simulator"
 readme = "README.md"
 authors = [

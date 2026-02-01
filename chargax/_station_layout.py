@@ -15,6 +15,7 @@ class ChargersState(eqx.Module):
     car_battery_capacity_kw: Array
     car_desired_battery_percentage: Array
     car_arrival_battery_kw: Array  # To compensate / block the agent from discharging further than the arrival battery
+    car_time_waited: Array
     charge_sensitive: Array  # False = Time sensitive
 
     # we need to keep track of the discharging per EV
@@ -105,6 +106,7 @@ class ChargersState(eqx.Module):
 
         # set types
         self.car_time_till_leave = self.car_time_till_leave.astype(int)
+        self.car_time_waited = self.car_time_waited.astype(int)
         self.charge_sensitive = self.charge_sensitive.astype(bool)
 
         # set charger voltage and dc/ac
