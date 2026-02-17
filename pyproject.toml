@@ -1,13 +1,13 @@
 [project]
 name = "chargax"
-version = "0.2.2"
+version = "0.3.0"
 description = "A JAX Accelerated EV Charging Simulator"
 readme = "README.md"
 authors = [
     { name = "Koen Ponse", email = "k.ponse@liacs.leidenuniv.nl" }
 ]
-requires-python = ">=3.11"
-dependencies = ['jaxnasium[algs]>=0.0.26']
+requires-python = ">=3.13"
+dependencies = ['jaxnasium[algs]>=0.0.29']
 
 [build-system]
 requires = ["hatchling"]

@@ -11,25 +11,29 @@ from jaxnasium import TimeStep
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from ._data_loaders import get_car_data, get_scenario
-from ._station_layout import ChargersState, ChargingStation, StationBattery
+from ._station_layout import EVSE, ChargingStation, StationBattery
 
 
-class EnvState(eqx.Module):
-    day_of_year: int  # Sampled at reset()
-
-    chargers_state: ChargersState
-    battery_state: StationBattery = StationBattery()
+class EnvState(jym.EnvState):
+    grid: ChargingStation
+    day_of_year: int
     timestep: int = 0
-    is_workday: bool = True
 
-    # Reward variables
+    @property
+    def is_workday(self) -> bool:
+        """
+        Determine if the current day is a workday (Monday to Friday).
+        """
+        offset = datetime.datetime(2024, 1, 1).weekday()
+        day_of_week = (self.day_of_year + offset) % 7
+        return day_of_week < 5
+
+    # Reward variables:
     profit: float = 0.0
     uncharged_percentages: float = 0.0
     uncharged_kw: float = 0.0
-    charged_overtime: int = 0  # Minutes over the desired charge time
-    charged_undertime: int = (
-        0  # Minutes under the desired charge time (positive reward)
-    )
+    charged_overtime: int = 0
+    charged_undertime: int = 0
     rejected_customers: int = 0
     left_customers: int = 0
     exceeded_capacity: float = 0.0
@@ -38,6 +42,7 @@ class EnvState(eqx.Module):
 
 
 class Chargax(jym.Environment):
+    station: ChargingStation = eqx.field(static=True)
     elec_grid_buy_price: jnp.ndarray = eqx.field(converter=jnp.asarray)  # €/kWh
     elec_grid_sell_price: jnp.ndarray = eqx.field(converter=jnp.asarray)  # €/kWh
     elec_customer_sell_price: float = 0.75  # €/kWh
@@ -54,11 +59,10 @@ class Chargax(jym.Environment):
     ] = eqx.field(converter=str.lower, default="shopping")
     arrival_frequency: int | Literal["low", "medium", "high"] = 100
 
-    # Station:
-    station: ChargingStation = None
-    num_chargers: int = 16  # Used if station is None
-    num_chargers_per_group: int = 2  # Used if station is None
-    num_dc_groups: int = 5  # Used if station is None
+    # # Station:
+    # num_chargers: int = 16  # Used if station is None
+    # num_chargers_per_group: int = 2  # Used if station is None
+    # num_dc_groups: int = 5  # Used if station is None
 
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
@@ -113,34 +117,19 @@ class Chargax(jym.Environment):
             pre_sample_data(arrival_data_weekends, num_samples=(10000 // 7) * 2),
         )
 
-        if self.station is None:
-            station = ChargingStation(
-                num_chargers=self.num_chargers,
-                num_chargers_per_group=self.num_chargers_per_group,
-                num_dc_groups=self.num_dc_groups,
-            )
-            self.__setattr__("station", station)
+        # if self.station is None:
+        #     station = ChargingStation(
+        #         num_chargers=self.num_chargers,
+        #         num_chargers_per_group=self.num_chargers_per_group,
+        #         num_dc_groups=self.num_dc_groups,
+        #     )
+        #     self.__setattr__("station", station)
 
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
-        day_of_year = jax.random.randint(
-            key, (), 0, 365
-        )  # 0-364 (sort of exploring starts)
 
-        # we assume the year is 2024 for now ... check if the day is a workday or weekendday
-        def get_is_workday(
-            day_of_year: int, offset: int = datetime.datetime(2024, 1, 1).weekday()
-        ) -> bool:
-            """
-            offset=2 would make day 0 a Wednesday (i.e., if Jan 1 is a Wed).
-            """
-            day_of_week = (day_of_year + offset) % 7
-            return day_of_week < 5
-
-        is_workday = get_is_workday(day_of_year)
         state = EnvState(
-            day_of_year=day_of_year,
-            chargers_state=ChargersState(self.station),
-            is_workday=is_workday,
+            day_of_year=jax.random.randint(key, (), 0, 365),
+            grid=self.station.zero_grid(),
         )
         observation = self.get_observation(state)
         return observation, state
@@ -151,25 +140,29 @@ class Chargax(jym.Environment):
         rng, key = jax.random.split(rng)
         new_state = old_state
 
-        actions = self.preprocess_actions(actions)
+        new_state = self.set_charging_currents(new_state, actions)
 
-        new_state = self.set_currents_and_update_charge_levels(new_state, actions)
-        new_state = self.process_grid_transactions(old_state, new_state)
-        new_state = self.update_time_and_clear_cars(new_state)
-        new_state = self.add_new_cars(new_state, key)
+        charging_ports = new_state.grid.evses_flat
+        batteries = new_state.grid.batteries_flat
 
-        # Set all variables of cars that have left to 0:
-        charger_state_vars, cs_structure = jax.tree.flatten(new_state.chargers_state)
-        charger_state_vars = jax.tree.map(
-            lambda x: x * new_state.chargers_state.charger_is_car_connected,
-            charger_state_vars,
+        new_state, charging_ports = self.charge_cars(
+            new_state, charging_ports, batteries
         )
-        charger_state = jax.tree.unflatten(cs_structure, charger_state_vars)
+        new_state, charging_ports = self.update_time_and_clear_cars(
+            new_state, charging_ports
+        )
+        new_state, charging_ports = self.add_new_cars(key, new_state, charging_ports)
 
-        new_state = replace(
-            new_state,
-            chargers_state=charger_state,
-            timestep=old_state.timestep + 1,  # advance time while we are at it
+        # Set all chargers with no car connected to 0:
+        charging_ports = jax.tree.map(
+            lambda itm: itm * charging_ports.charger_is_car_connected, charging_ports
+        )
+
+        new_state = new_state._replace(
+            grid=new_state.grid.update_batteries_from_flat(
+                batteries
+            ).update_evses_from_flat(charging_ports),
+            timestep=old_state.timestep + 1,
         )
 
         timestep_object = jym.TimeStep(
@@ -182,209 +175,199 @@ class Chargax(jym.Environment):
 
         return timestep_object, new_state
 
-    def preprocess_actions(self, actions: Array) -> Array:
-        actions = actions / self.num_discretization_levels
-        if self.allow_discharging:
-            actions = actions - 1
-        return actions
+    def set_charging_currents(self, state: EnvState, actions: Array) -> EnvState:
+        """Set new currents and power levels based on actions"""
 
-    def set_currents_and_update_charge_levels(
-        self, state: EnvState, actions: Array
-    ) -> EnvState:
-        idx_per_group = self.station.charger_ids_per_evse
-        max_current_per_evse = [evse.current_max for evse in self.station.evses]
-        assert len(max_current_per_evse) == len(idx_per_group)
+        def _set_action(item: EVSE | StationBattery, action: Array):
+            action = action / self.num_discretization_levels
 
-        currents = jnp.zeros(self.station.num_chargers)
-        for i, charger_group in enumerate(idx_per_group):
-            currents = currents.at[charger_group].set(
-                actions[charger_group] * max_current_per_evse[i]
-            )
+            if isinstance(item, EVSE):
+                # Only set the current, process charging later as a single operation
+                # TODO: Process it here !
+                if self.allow_discharging:
+                    action = action - 1
 
-        currents = jnp.clip(
-            currents,
-            -state.chargers_state.car_max_current_outtake
-            if self.allow_discharging
-            else 0,
-            state.chargers_state.car_max_current_intake,
-        )  # car_max_current_intake is 0 when no car is connected
+                # clip within car ranges and set current
+                current = jnp.clip(
+                    action * item.max_current,
+                    -item.car_max_current_outtake if self.allow_discharging else 0,
+                    item.car_max_current_intake,
+                )  # car_max_current_intake is 0 when no car is connected
+                return item.replace(charger_current_now=current)
 
-        charger_state = replace(state.chargers_state, charger_current_now=currents)
+            elif isinstance(item, StationBattery):
+                # For the battery, directly set the output power and update the battery level
+                # This way we can normalize the currents based on the what the battery actually provided
+                action = action - 1
+                desired_output_kw = action * item.max_rate_kw
+                desired_output_kw_now = self.kw_to_kw_this_timestep(desired_output_kw)
+                new_battery_level = jnp.clip(
+                    item.battery_now + desired_output_kw_now, 0, item.capacity_kw
+                )
+                battery_change = new_battery_level - item.battery_now
+                actual_output_kw = battery_change * (60 / self.minutes_per_timestep)
+                return item.replace(
+                    battery_now=new_battery_level, output_now_kw=actual_output_kw
+                )
 
+            raise ValueError("Invalid item type")
+
+        updated_grid: ChargingStation = jax.tree.map(
+            _set_action,
+            state.grid,
+            actions,
+            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery)),
+        )
         if self.renormalize_currents:
-            # NOTE: I am not sure if looping over the splitters backwards is the correct order
-            for splitter in self.station.splitters[::-1]:
-                charger_state = splitter.normalize_currents(charger_state)
-            charger_state = self.station.root.normalize_currents(charger_state)
+            updated_grid = updated_grid.distribute()
 
-        ### Update Car Battery Levels
-        tried_charged_this_timestep = self.kw_to_kw_this_timestep(
-            charger_state.charger_output_now_kw
-        )
-        new_car_batteries = jnp.clip(
-            state.chargers_state.car_battery_now_kw + tried_charged_this_timestep,
-            state.chargers_state.car_arrival_battery_kw,  # can't discharge under arrival battery
-            state.chargers_state.car_battery_capacity_kw,
-        )
-        actual_charged_this_timestep = (
-            new_car_batteries - state.chargers_state.car_battery_now_kw
-        )
-
-        # update discharged
-        discharged_this_session = jnp.maximum(
-            state.chargers_state.car_discharged_this_session_kw
-            + -actual_charged_this_timestep,
-            0,
-        )
-
-        charger_state = replace(
-            charger_state,
-            car_battery_now_kw=new_car_batteries,
-            car_discharged_this_session_kw=discharged_this_session,
-        )
-
-        ### Update Station Battery Levels
-        new_battery_state = state.battery_state
-        if self.include_battery:
-            battery_action = actions[-1]
-            battery_charge_or_discharge = (
-                battery_action * state.battery_state.max_rate_kw
-            )
-            battery_charge_or_discharge = self.kw_to_kw_this_timestep(
-                battery_charge_or_discharge
-            )
-            new_battery_charge = jnp.clip(
-                state.battery_state.battery_now + battery_charge_or_discharge,
-                0,
-                state.battery_state.capacity_kw,
-            )
-            new_battery_state = replace(
-                state.battery_state, battery_now=new_battery_charge
-            )
-
-        exceeded_capacity = 0.0
-        for splitter in self.station.splitters:
-            exceeded_capacity += jnp.maximum(
-                splitter.total_kw_throughput(charger_state)
-                - splitter.group_capacity_max_kw,
-                0,
-            )
-
-        charging_cars_now = jnp.maximum(0, charger_state.charger_output_now_kw)
-        discharging_cars_now = jnp.minimum(0, charger_state.charger_output_now_kw)
-        charging_cars_now_kw = self.kw_to_kw_this_timestep(charging_cars_now).sum()
-        discharging_cars_now_kw = jnp.abs(
-            self.kw_to_kw_this_timestep(discharging_cars_now).sum()
-        )
-
-        battery_change = state.battery_state.battery_now - new_battery_state.battery_now
-        charging_battery_now = jnp.maximum(0, battery_change)
-        discharging_battery_now = jnp.abs(jnp.minimum(0, battery_change))
-
-        total_charged = charging_cars_now_kw + charging_battery_now
-        total_discharged = discharging_cars_now_kw + discharging_battery_now
+        exceeded_capacity = updated_grid.exceeded_power_all_children
 
         return replace(
             state,
-            chargers_state=charger_state,
-            battery_state=new_battery_state,
-            exceeded_capacity=exceeded_capacity,
-            total_charged_kw=state.total_charged_kw + total_charged,
-            total_discharged_kw=state.total_discharged_kw + total_discharged,
+            grid=updated_grid,
+            exceeded_capacity=state.exceeded_capacity + exceeded_capacity,
         )
+
+    def charge_cars(
+        self,
+        state: EnvState,
+        charging_ports: EVSE,
+        # charging_ports_old: EVSE,
+        batteries: StationBattery,
+        # batteries_old: StationBattery,
+    ) -> EnvState:
+
+        charging_now = self.kw_to_kw_this_timestep(charging_ports.power_output)
+        previous_battery = charging_ports.car_battery_now_kw
+        new_battery = (previous_battery + charging_now).clip(
+            charging_ports.car_arrival_battery_kw,  # can't discharge under arrival battery
+            charging_ports.car_battery_capacity_kw,
+        )
+        real_charged_this_timestep = new_battery - previous_battery
+
+        # Calculate customer revenue (EVSEs only)
+        energy_sold = jnp.maximum(
+            jnp.maximum(real_charged_this_timestep, 0.0)
+            - charging_ports.car_discharged_this_session_kw,
+            0.0,
+        ).sum()
+        revenue = energy_sold * self.elec_customer_sell_price
+        discharged_this_session = (
+            charging_ports.car_discharged_this_session_kw + -real_charged_this_timestep
+        ).clip(0)
+
+        grid_draw_evses = jnp.where(
+            real_charged_this_timestep >= 0,
+            real_charged_this_timestep / charging_ports.cumulative_efficiency,
+            real_charged_this_timestep * charging_ports.cumulative_efficiency,
+        )
+        batteries_output_now_kw = self.kw_to_kw_this_timestep(batteries.output_now_kw)
+        grid_draw_batteries = jnp.where(
+            batteries_output_now_kw >= 0,
+            batteries_output_now_kw / batteries.cumulative_efficiency,
+            batteries_output_now_kw * batteries.cumulative_efficiency,
+        )
+        total_grid_draw = grid_draw_evses.sum() + grid_draw_batteries.sum()
+        elec_price = jax.lax.select(
+            total_grid_draw >= 0,
+            self.elec_grid_buy_price[state.day_of_year][state.timestep],
+            self.elec_grid_sell_price[state.day_of_year][state.timestep],
+        )
+        profit = state.profit + revenue - total_grid_draw * elec_price
+        charging_ports = charging_ports.replace(
+            car_discharged_this_session_kw=discharged_this_session,
+            car_battery_now_kw=new_battery,
+        )
+        total_charged = jnp.maximum(real_charged_this_timestep, 0.0).sum()
+        total_discharged = jnp.maximum(-real_charged_this_timestep, 0.0).sum()
+
+        return replace(
+            state,
+            profit=profit,
+            total_charged_kw=total_charged,
+            total_discharged_kw=total_discharged,
+        ), charging_ports
 
     def process_grid_transactions(
         self, old_state: EnvState, new_state: EnvState
     ) -> EnvState:
-        charged_this_timestep = (
-            new_state.chargers_state.car_battery_now_kw
-            - old_state.chargers_state.car_battery_now_kw
-        )
+        """Compute profit from energy sold to customers minus energy cost from the grid."""
 
-        energy_sold_to_customers = jnp.maximum(charged_this_timestep, 0)
-        # some energy should be free because it was discharged earlier
-        discharged_earlier = old_state.chargers_state.car_discharged_this_session_kw
-        energy_sold_to_customers = jnp.maximum(
-            energy_sold_to_customers - discharged_earlier, 0
-        )
-        customer_revenue = (
-            energy_sold_to_customers.sum() * self.elec_customer_sell_price
-        )
+        def _energy_delta(old, new):
+            if isinstance(new, EVSE):
+                return (new.car_battery_now_kw - old.car_battery_now_kw).sum()
+            assert isinstance(new, StationBattery)
+            return new.battery_now - old.battery_now  # StationBattery
 
-        grid_energy_transported = jnp.where(  # adjust for efficiency
-            # When charging, add losses. When discharging, subtract losses
-            charged_this_timestep >= 0,
-            charged_this_timestep * self.station.root.efficiency_per_charger,
-            charged_this_timestep / self.station.root.efficiency_per_charger,
-        ).sum()
-        if self.include_battery:
-            grid_energy_transported += (
-                new_state.battery_state.battery_now
-                - old_state.battery_state.battery_now
+        # Calculate customer revenue (EVSEs only)
+        customer_revenue = 0.0
+        for old_evse, new_evse in zip(old_state.grid.evses, new_state.grid.evses):
+            charged = _energy_delta(old_evse, new_evse)
+            sold = jnp.maximum(
+                jnp.maximum(charged, 0.0) - old_evse.car_discharged_this_session_kw,
+                0.0,
+            )
+            customer_revenue += sold.sum() * self.elec_customer_sell_price
+
+        # Calculate actual grid draw (accounting for efficiency losses)
+        grid_draw = 0.0
+        old_chargeables = old_state.grid.evses + old_state.grid.batteries
+        new_chargeables = new_state.grid.evses + new_state.grid.batteries
+        for old_leaf, new_leaf in zip(old_chargeables, new_chargeables):
+            actual_charging = _energy_delta(old_leaf, new_leaf)
+            efficiency = new_state.grid.cumulative_efficiency_of(new_leaf)
+            grid_draw += jnp.where(
+                actual_charging >= 0,
+                actual_charging / efficiency,
+                actual_charging * efficiency,
             )
 
+        # Calculate electricity cost/revenue from grid transactions and update profit
         elec_price = jax.lax.select(
-            grid_energy_transported >= 0,
-            self.elec_grid_buy_price[new_state.day_of_year][
-                new_state.timestep
-            ],  # Buying from grid
-            self.elec_grid_sell_price[new_state.day_of_year][
-                new_state.timestep
-            ],  # Selling to grid
+            grid_draw >= 0,
+            self.elec_grid_buy_price[new_state.day_of_year][new_state.timestep],
+            self.elec_grid_sell_price[new_state.day_of_year][new_state.timestep],
         )
-        energy_cost = (
-            grid_energy_transported * elec_price
-        )  # $/kWh -- negative when selling
-
-        profit = new_state.profit + customer_revenue - energy_cost
+        profit = new_state.profit + customer_revenue - grid_draw * elec_price
 
         return replace(new_state, profit=profit)
 
-    def update_time_and_clear_cars(self, state: EnvState) -> EnvState:
-        car_time_till_leave = (
-            state.chargers_state.car_time_till_leave - self.minutes_per_timestep
+    def update_time_and_clear_cars(
+        self, state: EnvState, ports: EVSE
+    ) -> tuple[EnvState, EVSE]:
+        new_time_till_leave = ports.car_time_till_leave - self.minutes_per_timestep
+        new_time_waited = ports.car_time_waited + self.minutes_per_timestep
+        is_leaving_time_sensitive = new_time_till_leave <= 0
+        is_leaving_charge_sensitive = ports.car_battery_desired_remaining <= 0
+        is_leaving = (is_leaving_charge_sensitive * ports.charge_sensitive) + (
+            is_leaving_time_sensitive * ~ports.charge_sensitive
         )
-
-        time_sensitive_leaving = jnp.logical_and(
-            car_time_till_leave <= 0, ~state.chargers_state.charge_sensitive
-        )
-        charge_sensitive_leaving = jnp.logical_and(
-            state.chargers_state.car_battery_desired_remaining <= 0,
-            state.chargers_state.charge_sensitive,
-        )
-        cars_leaving = (
-            jnp.logical_or(time_sensitive_leaving, charge_sensitive_leaving)
-            * state.chargers_state.charger_is_car_connected
-        )
+        is_leaving = is_leaving * ports.charger_is_car_connected
 
         uncharged_percentages = (
-            cars_leaving
-            * jnp.maximum(0, state.chargers_state.car_battery_desired_remaining)
+            is_leaving * jnp.maximum(ports.car_battery_desired_remaining, 0)
         ).sum()
         uncharged_kw = (
-            cars_leaving
-            * jnp.maximum(0, state.chargers_state.car_battery_desired_remaining_kw)
+            is_leaving * jnp.maximum(0, ports.car_battery_desired_remaining_kw)
         ).sum()
+        charged_overtime = (
+            jnp.abs(is_leaving * jnp.minimum(0, ports.car_time_till_leave))
+            .sum()
+            .astype(int)
+        )  # Use previous time till leave to calculate overtime
+        charged_undertime = (
+            (is_leaving * jnp.maximum(0, new_time_till_leave)).sum().astype(int)
+        )
+        cars_leaving = is_leaving.sum()
 
-        charged_overtime = jnp.abs(
-            cars_leaving
-            * jnp.minimum(
-                car_time_till_leave
-                + self.minutes_per_timestep,  # add back the current timestep
-                0,
-            )
-        ).sum()
-        charged_undertime = (cars_leaving * jnp.maximum(car_time_till_leave, 0)).sum()
+        ports = ports.replace(
+            car_time_till_leave=new_time_till_leave.astype(int),
+            car_time_waited=new_time_waited,
+            charger_is_car_connected=ports.charger_is_car_connected * ~is_leaving,
+        )
 
-        car_connected = state.chargers_state.charger_is_car_connected * ~cars_leaving
-
-        return replace(
-            state,
-            chargers_state=replace(
-                state.chargers_state,
-                car_time_till_leave=car_time_till_leave,
-                charger_is_car_connected=car_connected,
-            ),
+        state = state._replace(
             uncharged_percentages=state.uncharged_percentages + uncharged_percentages,
             uncharged_kw=state.uncharged_kw + uncharged_kw,
             charged_overtime=state.charged_overtime + charged_overtime,
@@ -392,7 +375,11 @@ class Chargax(jym.Environment):
             left_customers=state.left_customers + cars_leaving.sum(),
         )
 
-    def add_new_cars(self, state: EnvState, key: PRNGKeyArray) -> EnvState:
+        return state, ports
+
+    def add_new_cars(
+        self, key: PRNGKeyArray, state: EnvState, ports: EVSE
+    ) -> tuple[EnvState, EVSE]:
         key1, key2 = jax.random.split(key)
 
         # poission dists are pre-sampled -- but each is independent, so we can just
@@ -407,9 +394,7 @@ class Chargax(jym.Environment):
         # Generate new chargers and put the car_connected to False when:
         # 1. The index of the charger is already connected to a car
         # 2. There are less incoming cars than chargers
-        not_connected_chargers = jnp.logical_not(
-            state.chargers_state.charger_is_car_connected
-        )
+        not_connected_chargers = jnp.logical_not(ports.charger_is_car_connected)
         sort_order = jnp.argsort(not_connected_chargers, descending=True)
         required_chargers = jnp.arange(self.station.num_chargers) < new_cars_amount
         required_chargers_in_order = (
@@ -419,35 +404,34 @@ class Chargax(jym.Environment):
             required_chargers_in_order * not_connected_chargers
         )  # adjust for overflow
         incoming_chargers = self.sample_cars(key2)
-        incoming_chargers = replace(
-            incoming_chargers,
+        incoming_chargers = incoming_chargers.replace(
             charger_is_car_connected=arrival_of_new_car_positions,
         )
         # Merge the incoming chargers with the current chargers
         merged_chargers = jax.tree.map(
             lambda new, curr: jax.lax.select(arrival_of_new_car_positions, new, curr),
             incoming_chargers,
-            state.chargers_state,
+            ports,
         )
 
         rejected_customers = jnp.maximum(
             new_cars_amount - not_connected_chargers.sum(), 0
         ).astype(jnp.int32)
 
-        return replace(
-            state,
-            chargers_state=merged_chargers,
-            rejected_customers=state.rejected_customers + rejected_customers,
+        state = state._replace(
+            rejected_customers=state.rejected_customers + rejected_customers
         )
 
-    def sample_cars(self, key: PRNGKeyArray) -> ChargersState:
+        return state, merged_chargers
+
+    def sample_cars(self, key: PRNGKeyArray) -> EVSE:
         """
         Returns a ChargersState based on the current scenario (user and car profiles)
         In the returned ChargersState, all connections are filled
         with is_car_connected to false. The required number of chargers should then
         be connected and then merged with the current ChargersState.
         """
-        chargers_state = ChargersState(self.station)
+        chargers_state = self.station.zero_grid().evses_flat
         if self.car_profiles in ["eu", "us", "world"]:
             car_data = jnp.array(get_car_data(self.car_profiles))
             probs = car_data[:, 0]
@@ -458,8 +442,7 @@ class Chargax(jym.Environment):
             capacity_car_data = car_data[:, 2]
             ac_max_rate_car_data = car_data[:, 3]
             dc_max_rate_car_data = car_data[:, 4]
-            chargers_state = replace(
-                chargers_state,
+            chargers_state = chargers_state.replace(
                 car_ac_absolute_max_charge_rate_kw=ac_max_rate_car_data[cars],
                 car_ac_optimal_charge_threshold=tau_car_data[cars],
                 car_dc_absolute_max_charge_rate_kw=dc_max_rate_car_data[cars],
@@ -501,60 +484,23 @@ class Chargax(jym.Environment):
                     keys[2], 0.1, shape=(self.station.num_chargers,)
                 )
 
-            chargers_state = replace(
-                chargers_state,
+            chargers_state = chargers_state.replace(
                 car_time_till_leave=car_time_till_leave,
                 car_battery_now_kw=car_battery_now_kw,
                 car_desired_battery_percentage=car_desired_battery_percentage,
                 charge_sensitive=charge_sensitive,
             )
 
-        return replace(
-            chargers_state,
+        return chargers_state.replace(
             car_arrival_battery_kw=chargers_state.car_battery_now_kw,  # copy the initial battery percentage
         )
 
     def get_observation(self, state: EnvState) -> Array:
-        charger_state = state.chargers_state
-        battery_state = state.battery_state
 
-        observations = jnp.concatenate(
-            [
-                charger_state.car_time_till_leave,
-                charger_state.car_battery_now_kw,
-                charger_state.car_battery_capacity_kw,
-                # charger_state.car_desired_battery_percentage,
-                charger_state.charge_sensitive,
-                charger_state.car_battery_percentage,
-                charger_state.car_battery_desired_remaining,
-                charger_state.car_max_current_intake,
-                charger_state.car_max_current_outtake,
-                charger_state.car_discharged_this_session_kw,
-                charger_state.car_arrival_battery_kw,
-                state.chargers_state.car_battery_now_kw
-                < state.chargers_state.car_arrival_battery_kw,
-                state.chargers_state.car_arrival_battery_kw
-                - state.chargers_state.car_battery_now_kw,
-                charger_state.car_ac_absolute_max_charge_rate_kw,
-                charger_state.car_ac_optimal_charge_threshold,
-                charger_state.car_dc_absolute_max_charge_rate_kw,
-                charger_state.car_dc_optimal_charge_threshold,
-                charger_state.charger_output_now_kw,
-            ]
-        )
-        if self.include_battery:
-            observations = jnp.concatenate(
-                [
-                    observations,
-                    jnp.array(
-                        [
-                            battery_state.battery_now,
-                            battery_state.battery_percentage,
-                            battery_state.max_rate_kw,
-                        ]
-                    ),
-                ]
-            )
+        observations = {
+            "evses": state.grid.evses,
+            "batteries": state.grid.batteries,
+        }
 
         timesteps_per_hour = 60 // self.minutes_per_timestep
 
@@ -570,21 +516,16 @@ class Chargax(jym.Environment):
         price_diffs_buy = buy_prices[1:] - buy_prices[0]  # all diffs from now
         price_diffs_sell = sell_prices[1:] - sell_prices[0]  # ""
 
-        observations = jnp.concatenate(
-            [
-                observations,
-                jnp.array(
-                    [
-                        state.timestep,
-                        state.day_of_year,
-                        state.is_workday,
-                    ]
-                ),
-                buy_prices,
-                sell_prices,
-                price_diffs_buy,
-                price_diffs_sell,
-            ]
+        observations.update(
+            {
+                "buy_prices_next_5_hours": buy_prices,
+                "sell_prices_next_5_hours": sell_prices,
+                "price_diffs_buy_next_5_hours": price_diffs_buy,
+                "price_diffs_sell_next_5_hours": price_diffs_sell,
+                "current_timestep": state.timestep,
+                "current_day_of_year": state.day_of_year,
+                "is_workday": state.is_workday,
+            }
         )
 
         return observations
@@ -638,19 +579,19 @@ class Chargax(jym.Environment):
                     "uncharged_kw": state.uncharged_kw,
                     "charged_overtime": state.charged_overtime,
                     "charged_undertime": state.charged_undertime,
-                    "battery_level": state.battery_state.battery_now,
-                    "battery_percentage": state.battery_state.battery_percentage,
+                    # "battery_level": state.grid.battery_now,
+                    # "battery_percentage": state.battery_state.battery_percentage,
                 }
             }
         return {
             "actions": actions,
             **asdict(state),
-            "car_battery_percentage": state.chargers_state.car_battery_percentage,
-            "car_battery_desired_remaining": state.chargers_state.car_battery_desired_remaining,
-            "charger_output_now_kw": state.chargers_state.charger_output_now_kw,
-            "charger_throughput_now_kw": state.chargers_state.charger_throughput_now_kw,
-            "car_max_current_intake": state.chargers_state.car_max_current_intake,
-            "car_max_current_outtake": state.chargers_state.car_max_current_outtake,
+            # "car_battery_percentage": state.chargers_state.car_battery_percentage,
+            # "car_battery_desired_remaining": state.chargers_state.car_battery_desired_remaining,
+            # "charger_output_now_kw": state.chargers_state.charger_output_now_kw,
+            # "charger_throughput_now_kw": state.chargers_state.charger_throughput_now_kw,
+            # "car_max_current_intake": state.chargers_state.car_max_current_intake,
+            # "car_max_current_outtake": state.chargers_state.car_max_current_outtake,
             "reward": self.get_reward(old_state, state),
         }
 
@@ -660,17 +601,30 @@ class Chargax(jym.Environment):
     @property
     def observation_space(self):
         obs, _ = self.reset_env(jax.random.PRNGKey(0))
-        return jym.Box(-1, 1, obs.shape)
+        return jax.tree.map(
+            lambda v: jym.Box(-jnp.inf, jnp.inf, getattr(v, "shape", ())), obs
+        )
 
     @property
     def action_space(self) -> jym.Space:
         """
         Define the action space of the environment.
         """
-        num_action_objects = self.station.num_chargers
-        num_actions_per_object = self.num_discretization_levels
-        if self.include_battery:
-            num_action_objects += 1
+        num_actions_per_charger = self.num_discretization_levels
         if self.allow_discharging:
-            num_actions_per_object *= 2
-        return jym.MultiDiscrete(np.full(num_action_objects, num_actions_per_object))
+            num_actions_per_charger *= 2
+        num_actions_per_battery = self.num_discretization_levels * 2
+
+        def _create_action_space(item: EVSE | StationBattery) -> jym.Space:
+            if isinstance(item, EVSE):
+                return jym.MultiDiscrete(
+                    np.full(item.num_chargers, num_actions_per_charger)
+                )
+            elif isinstance(item, StationBattery):
+                return jym.Discrete(num_actions_per_battery)
+
+        return jax.tree.map(
+            _create_action_space,
+            self.station,
+            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery)),
+        )
