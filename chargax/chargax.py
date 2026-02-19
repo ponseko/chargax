@@ -11,7 +11,10 @@ from jaxnasium import TimeStep
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from ._data_loaders import get_car_data, get_scenario
-from ._default_data_loaders import default_get_num_cars_arriving_constructor
+from ._default_data_loaders import (
+    default_fill_EVSES_from_scenario_constructor,
+    default_get_num_cars_arriving_constructor,
+)
 from ._station_layout import EVSE, ChargingStation, StationBattery
 
 
@@ -49,7 +52,7 @@ class Chargax(jym.Environment):
     elec_customer_sell_price: float = 0.75  # €/kWh
 
     get_num_cars_arriving: Callable[[PRNGKeyArray, EnvState], int] = None
-    # get_new_cars_arriving: Callable[[PRNGKeyArray, EnvState], EVSE] = None
+    get_new_cars_arriving: Callable[[PRNGKeyArray, EnvState], EVSE] = None
     # get_grid_buy_price: Callable[[EnvState], float] = None
     # get_grid_sell_price: Callable[[EnvState], float] = None
     # get_customer_sell_price: Callable[[EnvState], float] = None
@@ -99,6 +102,12 @@ class Chargax(jym.Environment):
             self.__setattr__(
                 "get_num_cars_arriving",
                 default_get_num_cars_arriving_constructor(self, "medium", "shopping"),
+            )
+
+        if self.get_new_cars_arriving is None:
+            self.__setattr__(
+                "get_new_cars_arriving",
+                default_fill_EVSES_from_scenario_constructor(self, "eu", "shopping"),
             )
 
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
@@ -374,7 +383,8 @@ class Chargax(jym.Environment):
         arrival_of_new_car_positions = (
             required_chargers_in_order * not_connected_chargers
         )  # adjust for overflow
-        incoming_chargers = self.sample_cars(key2)
+        incoming_chargers = self.get_new_cars_arriving(key2, state)
+        # incoming_chargers = self.sample_cars(key2)
         incoming_chargers = incoming_chargers.replace(
             charger_is_car_connected=arrival_of_new_car_positions,
         )
