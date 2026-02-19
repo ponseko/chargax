@@ -27,7 +27,7 @@ class EnvState(jym.EnvState):
         """
         Determine if the current day is a workday (Monday to Friday).
         """
-        offset = datetime.datetime(2024, 1, 1).weekday()
+        offset = datetime.datetime(2024, 1, 1).weekday()  # 0 (change year if needed)
         day_of_week = (self.day_of_year + offset) % 7
         return day_of_week < 5
 
@@ -55,23 +55,6 @@ class Chargax(jym.Environment):
     get_grid_buy_price: Callable[[EnvState], float] = None
     get_grid_sell_price: Callable[[EnvState], float] = None
 
-    # Data:
-    # ev_arrival_means_workdays: jnp.ndarray = None
-    # ev_arrival_means_non_workdays: jnp.ndarray = None
-
-    # car_profiles: Literal["eu", "us", "world", "custom"] = eqx.field(
-    #     converter=str.lower, default="eu"
-    # )
-    # user_profiles: Literal[
-    #     "highway", "residential", "workplace", "shopping", "custom"
-    # ] = eqx.field(converter=str.lower, default="shopping")
-    # arrival_frequency: int | Literal["low", "medium", "high"] = 100
-
-    # # Station:
-    # num_chargers: int = 16  # Used if station is None
-    # num_chargers_per_group: int = 2  # Used if station is None
-    # num_dc_groups: int = 5  # Used if station is None
-
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
     charged_satisfaction_alpha: float = 0.0
@@ -86,7 +69,6 @@ class Chargax(jym.Environment):
     )
     minutes_per_timestep: int = 5
     renormalize_currents: bool = True
-    # include_battery: bool = True
     allow_discharging: bool = True
     price_hour_lookahead: int = 6
 
@@ -228,13 +210,8 @@ class Chargax(jym.Environment):
         )
 
     def charge_cars(
-        self,
-        state: EnvState,
-        charging_ports: EVSE,
-        # charging_ports_old: EVSE,
-        batteries: StationBattery,
-        # batteries_old: StationBattery,
-    ) -> EnvState:
+        self, state: EnvState, charging_ports: EVSE, batteries: StationBattery
+    ) -> tuple[EnvState, EVSE]:
 
         charging_now = self.kw_to_kw_this_timestep(charging_ports.power_output)
         previous_battery = charging_ports.car_battery_now_kw
@@ -395,10 +372,10 @@ class Chargax(jym.Environment):
 
         observations.update(
             {
-                "buy_prices_next_5_hours": future_prices,
-                "sell_prices_next_5_hours": future_sell_prices,
-                "price_diffs_buy_next_5_hours": price_diffs_buy,
-                "price_diffs_sell_next_5_hours": price_diffs_sell,
+                "future_buy_prices": future_prices,
+                "future_sell_prices": future_sell_prices,
+                "future_price_diffs_buy": price_diffs_buy,
+                "future_price_diffs_sell": price_diffs_sell,
                 "current_timestep": state.timestep,
                 "current_day_of_year": state.day_of_year,
                 "is_workday": state.is_workday,

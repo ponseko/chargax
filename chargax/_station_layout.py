@@ -59,7 +59,8 @@ class StationBattery(StationNode):
     def distribute(self, available_from_top: float):
         total_available = available_from_top + self.supplied_power
         scale_factor = jnp.minimum(1.0, total_available / (self.requested_power + 1e-8))
-        new_output = -jnp.maximum(-self.max_rate_kw, self.output_now_kw * scale_factor)
+        scaled_output = self.output_now_kw * scale_factor
+        new_output = jnp.clip(scaled_output, -self.max_rate_kw, self.max_rate_kw)
         return self.replace(output_now_kw=new_output)
 
 
@@ -255,18 +256,14 @@ class StationSplitter(StationNode):
 
     @property
     def requested_power(self) -> float:
-        evse_power = jnp.array([evse.requested_power for evse in self.evses])
-        battery_power = jnp.array(
-            [battery.requested_power for battery in self.batteries]
-        )
+        evse_power = self.evses_flat.requested_power
+        battery_power = self.batteries_flat.requested_power
         return jnp.sum(evse_power) + jnp.sum(battery_power)
 
     @property
     def supplied_power(self) -> float:
-        evse_power = jnp.array([evse.supplied_power for evse in self.evses])
-        battery_power = jnp.array(
-            [battery.supplied_power for battery in self.batteries]
-        )
+        evse_power = self.evses_flat.supplied_power
+        battery_power = self.batteries_flat.supplied_power
         return jnp.sum(evse_power) + jnp.sum(battery_power)
 
     @property
