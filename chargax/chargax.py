@@ -1,6 +1,6 @@
 import datetime
 from dataclasses import asdict, replace
-from typing import Callable, Dict, Literal, Tuple
+from typing import Callable, Dict, Tuple
 
 import equinox as eqx
 import jax
@@ -10,10 +10,9 @@ import numpy as np
 from jaxnasium import TimeStep
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from ._data_loaders import get_car_data, get_scenario
 from ._default_data_loaders import (
-    default_fill_EVSES_from_scenario_constructor,
-    default_get_num_cars_arriving_constructor,
+    build_default_grid_price_fn,
+    build_default_scenario,
 )
 from ._station_layout import EVSE, ChargingStation, StationBattery
 
@@ -53,21 +52,20 @@ class Chargax(jym.Environment):
 
     get_num_cars_arriving: Callable[[PRNGKeyArray, EnvState], int] = None
     get_new_cars_arriving: Callable[[PRNGKeyArray, EnvState], EVSE] = None
-    # get_grid_buy_price: Callable[[EnvState], float] = None
-    # get_grid_sell_price: Callable[[EnvState], float] = None
-    # get_customer_sell_price: Callable[[EnvState], float] = None
+    get_grid_buy_price: Callable[[EnvState], float] = None
+    get_grid_sell_price: Callable[[EnvState], float] = None
 
     # Data:
-    ev_arrival_means_workdays: jnp.ndarray = None
-    ev_arrival_means_non_workdays: jnp.ndarray = None
+    # ev_arrival_means_workdays: jnp.ndarray = None
+    # ev_arrival_means_non_workdays: jnp.ndarray = None
 
-    car_profiles: Literal["eu", "us", "world", "custom"] = eqx.field(
-        converter=str.lower, default="eu"
-    )
-    user_profiles: Literal[
-        "highway", "residential", "workplace", "shopping", "custom"
-    ] = eqx.field(converter=str.lower, default="shopping")
-    arrival_frequency: int | Literal["low", "medium", "high"] = 100
+    # car_profiles: Literal["eu", "us", "world", "custom"] = eqx.field(
+    #     converter=str.lower, default="eu"
+    # )
+    # user_profiles: Literal[
+    #     "highway", "residential", "workplace", "shopping", "custom"
+    # ] = eqx.field(converter=str.lower, default="shopping")
+    # arrival_frequency: int | Literal["low", "medium", "high"] = 100
 
     # # Station:
     # num_chargers: int = 16  # Used if station is None
@@ -90,24 +88,40 @@ class Chargax(jym.Environment):
     renormalize_currents: bool = True
     # include_battery: bool = True
     allow_discharging: bool = True
+    price_hour_lookahead: int = 6
 
     full_info_dict: bool = False
+
+    default_data_kwargs: Dict = eqx.field(static=True, default_factory=lambda: {})
 
     @property
     def max_episode_steps(self) -> int:
         return int(24 * 60 / self.minutes_per_timestep)  # Simulate one day
 
     def __post_init__(self):
-        if self.get_num_cars_arriving is None:
+        if self.get_num_cars_arriving is None or self.get_new_cars_arriving is None:
+            get_num_cars, get_new_cars = build_default_scenario(
+                self, **self.default_data_kwargs
+            )
+            if self.get_num_cars_arriving is None:
+                self.__setattr__("get_num_cars_arriving", get_num_cars)
+            if self.get_new_cars_arriving is None:
+                self.__setattr__("get_new_cars_arriving", get_new_cars)
+
+        dataset = self.default_data_kwargs.get("grid_price_dataset", "2023_NL")
+        sell_price_margin = self.default_data_kwargs.get("grid_sell_margin", -0.03)
+        if self.get_grid_buy_price is None:
             self.__setattr__(
-                "get_num_cars_arriving",
-                default_get_num_cars_arriving_constructor(self, "medium", "shopping"),
+                "get_grid_buy_price",
+                build_default_grid_price_fn(self, dataset=dataset, offset=0),
             )
 
-        if self.get_new_cars_arriving is None:
+        if self.get_grid_sell_price is None:
             self.__setattr__(
-                "get_new_cars_arriving",
-                default_fill_EVSES_from_scenario_constructor(self, "eu", "shopping"),
+                "get_grid_sell_price",
+                build_default_grid_price_fn(
+                    self, dataset=dataset, offset=sell_price_margin
+                ),
             )
 
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
@@ -169,8 +183,6 @@ class Chargax(jym.Environment):
             action = action / self.num_discretization_levels
 
             if isinstance(item, EVSE):
-                # Only set the current, process charging later as a single operation
-                # TODO: Process it here !
                 if self.allow_discharging:
                     action = action - 1
 
@@ -184,7 +196,6 @@ class Chargax(jym.Environment):
 
             elif isinstance(item, StationBattery):
                 # For the battery, directly set the output power and update the battery level
-                # This way we can normalize the currents based on the what the battery actually provided
                 action = action - 1
                 desired_output_kw = action * item.max_rate_kw
                 desired_output_kw_now = self.kw_to_kw_this_timestep(desired_output_kw)
@@ -258,8 +269,8 @@ class Chargax(jym.Environment):
         total_grid_draw = grid_draw_evses.sum() + grid_draw_batteries.sum()
         elec_price = jax.lax.select(
             total_grid_draw >= 0,
-            self.elec_grid_buy_price[state.day_of_year][state.timestep],
-            self.elec_grid_sell_price[state.day_of_year][state.timestep],
+            self.get_grid_buy_price(state),
+            self.get_grid_sell_price(state),
         )
         profit = state.profit + revenue - total_grid_draw * elec_price
         charging_ports = charging_ports.replace(
@@ -275,50 +286,6 @@ class Chargax(jym.Environment):
             total_charged_kw=total_charged,
             total_discharged_kw=total_discharged,
         ), charging_ports
-
-    def process_grid_transactions(
-        self, old_state: EnvState, new_state: EnvState
-    ) -> EnvState:
-        """Compute profit from energy sold to customers minus energy cost from the grid."""
-
-        def _energy_delta(old, new):
-            if isinstance(new, EVSE):
-                return (new.car_battery_now_kw - old.car_battery_now_kw).sum()
-            assert isinstance(new, StationBattery)
-            return new.battery_now - old.battery_now  # StationBattery
-
-        # Calculate customer revenue (EVSEs only)
-        customer_revenue = 0.0
-        for old_evse, new_evse in zip(old_state.grid.evses, new_state.grid.evses):
-            charged = _energy_delta(old_evse, new_evse)
-            sold = jnp.maximum(
-                jnp.maximum(charged, 0.0) - old_evse.car_discharged_this_session_kw,
-                0.0,
-            )
-            customer_revenue += sold.sum() * self.elec_customer_sell_price
-
-        # Calculate actual grid draw (accounting for efficiency losses)
-        grid_draw = 0.0
-        old_chargeables = old_state.grid.evses + old_state.grid.batteries
-        new_chargeables = new_state.grid.evses + new_state.grid.batteries
-        for old_leaf, new_leaf in zip(old_chargeables, new_chargeables):
-            actual_charging = _energy_delta(old_leaf, new_leaf)
-            efficiency = new_state.grid.cumulative_efficiency_of(new_leaf)
-            grid_draw += jnp.where(
-                actual_charging >= 0,
-                actual_charging / efficiency,
-                actual_charging * efficiency,
-            )
-
-        # Calculate electricity cost/revenue from grid transactions and update profit
-        elec_price = jax.lax.select(
-            grid_draw >= 0,
-            self.elec_grid_buy_price[new_state.day_of_year][new_state.timestep],
-            self.elec_grid_sell_price[new_state.day_of_year][new_state.timestep],
-        )
-        profit = new_state.profit + customer_revenue - grid_draw * elec_price
-
-        return replace(new_state, profit=profit)
 
     def update_time_and_clear_cars(
         self, state: EnvState, ports: EVSE
@@ -384,7 +351,6 @@ class Chargax(jym.Environment):
             required_chargers_in_order * not_connected_chargers
         )  # adjust for overflow
         incoming_chargers = self.get_new_cars_arriving(key2, state)
-        # incoming_chargers = self.sample_cars(key2)
         incoming_chargers = incoming_chargers.replace(
             charger_is_car_connected=arrival_of_new_car_positions,
         )
@@ -405,77 +371,6 @@ class Chargax(jym.Environment):
 
         return state, merged_chargers
 
-    def sample_cars(self, key: PRNGKeyArray) -> EVSE:
-        """
-        Returns a ChargersState based on the current scenario (user and car profiles)
-        In the returned ChargersState, all connections are filled
-        with is_car_connected to false. The required number of chargers should then
-        be connected and then merged with the current ChargersState.
-        """
-        chargers_state = self.station.zero_grid().evses_flat
-        if self.car_profiles in ["eu", "us", "world"]:
-            car_data = jnp.array(get_car_data(self.car_profiles))
-            probs = car_data[:, 0]
-            cars = jax.random.categorical(
-                key, probs, shape=(self.station.num_chargers,)
-            )
-            tau_car_data = car_data[:, 1]
-            capacity_car_data = car_data[:, 2]
-            ac_max_rate_car_data = car_data[:, 3]
-            dc_max_rate_car_data = car_data[:, 4]
-            chargers_state = chargers_state.replace(
-                car_ac_absolute_max_charge_rate_kw=ac_max_rate_car_data[cars],
-                car_ac_optimal_charge_threshold=tau_car_data[cars],
-                car_dc_absolute_max_charge_rate_kw=dc_max_rate_car_data[cars],
-                car_dc_optimal_charge_threshold=tau_car_data[cars],
-                car_battery_capacity_kw=capacity_car_data[cars],
-            )
-
-        if self.user_profiles in ["highway", "residential", "workplace", "shopping"]:
-            _, _, connection_times, energy_demands = get_scenario(self.user_profiles)
-            keys = jax.random.split(key, 3)
-            connection_times_rnd = jax.random.randint(
-                keys[0], (self.station.num_chargers,), 0, 101
-            )
-            energy_demands_rnd = jax.random.randint(
-                keys[1], (self.station.num_chargers,), 0, 101
-            )
-            car_time_till_leave = connection_times[connection_times_rnd].astype(int)
-
-            energy_demands = energy_demands[energy_demands_rnd]
-            car_desired_battery_percentage = jax.random.uniform(
-                keys[2], (self.station.num_chargers,), minval=0.8, maxval=0.95
-            )
-            car_desired_kw = (
-                chargers_state.car_battery_capacity_kw * car_desired_battery_percentage
-            )
-            car_battery_now_kw = car_desired_kw - energy_demands
-            car_battery_now_kw = jnp.clip(
-                car_battery_now_kw,
-                0.03 * chargers_state.car_battery_capacity_kw,
-                chargers_state.car_battery_capacity_kw,
-            )
-
-            if self.user_profiles == "highway":
-                charge_sensitive = jax.random.bernoulli(
-                    keys[2], 0.9, shape=(self.station.num_chargers,)
-                )
-            else:
-                charge_sensitive = jax.random.bernoulli(
-                    keys[2], 0.1, shape=(self.station.num_chargers,)
-                )
-
-            chargers_state = chargers_state.replace(
-                car_time_till_leave=car_time_till_leave,
-                car_battery_now_kw=car_battery_now_kw,
-                car_desired_battery_percentage=car_desired_battery_percentage,
-                charge_sensitive=charge_sensitive,
-            )
-
-        return chargers_state.replace(
-            car_arrival_battery_kw=chargers_state.car_battery_now_kw,  # copy the initial battery percentage
-        )
-
     def get_observation(self, state: EnvState) -> Array:
 
         observations = {
@@ -483,24 +378,25 @@ class Chargax(jym.Environment):
             "batteries": state.grid.batteries,
         }
 
+        # Get future prices
         timesteps_per_hour = 60 // self.minutes_per_timestep
-
-        # Get price data for current and next 5 hours using vectorized operations
-        hour_offsets = jnp.arange(6) * timesteps_per_hour  # [0, 1h, 2h, 3h, 4h, 5h]
-        timestep_indices = state.timestep + hour_offsets
-
-        # Get buy and sell prices for all time periods at once
-        buy_prices = self.elec_grid_buy_price[state.day_of_year][timestep_indices]
-        sell_prices = self.elec_grid_sell_price[state.day_of_year][timestep_indices]
+        hour_offsets = jnp.arange(self.price_hour_lookahead) * timesteps_per_hour
+        future_timesteps = state.timestep + hour_offsets
+        future_prices = jax.vmap(
+            lambda t: self.get_grid_buy_price(state._replace(timestep=t))
+        )(future_timesteps)
+        future_sell_prices = jax.vmap(
+            lambda t: self.get_grid_sell_price(state._replace(timestep=t))
+        )(future_timesteps)
 
         # Calculate price differences for all lookahead periods
-        price_diffs_buy = buy_prices[1:] - buy_prices[0]  # all diffs from now
-        price_diffs_sell = sell_prices[1:] - sell_prices[0]  # ""
+        price_diffs_buy = future_prices[1:] - future_prices[0]  # all diffs from now
+        price_diffs_sell = future_sell_prices[1:] - future_sell_prices[0]  # ""
 
         observations.update(
             {
-                "buy_prices_next_5_hours": buy_prices,
-                "sell_prices_next_5_hours": sell_prices,
+                "buy_prices_next_5_hours": future_prices,
+                "sell_prices_next_5_hours": future_sell_prices,
                 "price_diffs_buy_next_5_hours": price_diffs_buy,
                 "price_diffs_sell_next_5_hours": price_diffs_sell,
                 "current_timestep": state.timestep,

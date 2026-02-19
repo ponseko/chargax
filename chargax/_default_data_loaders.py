@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass, field
 from importlib import resources as r
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -47,7 +48,7 @@ def _interpolate_data_stepwise(data, length):
     return x
 
 
-def _get_scenario(dataset: str, average_cars_per_day, minutes_per_timestep):
+def _load_scenario_csvs(dataset: str, average_cars_per_day, minutes_per_timestep):
     def _load_scenario_data(csv_file):
         with open(csv_file, "r") as f:
             reader = csv.DictReader(f)
@@ -78,7 +79,7 @@ def _get_scenario(dataset: str, average_cars_per_day, minutes_per_timestep):
     return tuple(data)
 
 
-def _get_car_data(dataset: Literal["eu", "us", "world"]):
+def _load_car_profiles(dataset: Literal["eu", "us", "world"]):
     resources = r.files("chargax")
     csv_file = resources.joinpath(DATA_FOLDER, "car_frequency_and_profiles.csv")
     with open(csv_file, "r") as f:
@@ -104,27 +105,22 @@ def _get_car_data(dataset: Literal["eu", "us", "world"]):
     return merged_data
 
 
-def _default_get_num_cars_arriving(
-    key: PRNGKeyArray, state: EnvState, data: tuple[np.ndarray, np.ndarray]
-) -> int:
-    """Default function to get the number of cars arriving at the station."""
-
-    arrival_means = jax.lax.select(
-        state.is_workday,
-        data[0][:, state.timestep],
-        data[1][:, state.timestep],
-    )
-    randint = jax.random.randint(key, (), 0, arrival_means.shape[0])
-    random_arrivals = arrival_means[randint]
-    return random_arrivals
-
-
-def default_get_num_cars_arriving_constructor(
+def build_default_scenario(
     env: Chargax,
-    average_cars_per_day: int | Literal["low", "medium", "high"],
-    user_profile: Literal["highway", "residential", "workplace", "shopping"],
+    car_profile: Literal["eu", "us", "world"] = "eu",
+    user_profile: Literal[
+        "highway", "residential", "workplace", "shopping"
+    ] = "highway",
+    average_cars_per_day: int | Literal["low", "medium", "high"] = "medium",
     seed: int = 0,
-) -> Callable[[PRNGKeyArray, EnvState], int]:
+) -> tuple[
+    Callable[[PRNGKeyArray, EnvState], int], Callable[[PRNGKeyArray, EnvState], EVSE]
+]:
+    """Construct both the car arrival and EVSE filling callables from a single scenario.
+
+    Returns:
+        A tuple of (get_num_cars_arriving, get_new_cars_arriving) callables.
+    """
     if average_cars_per_day in ["low", "medium", "high"]:
         if average_cars_per_day == "low":
             average_cars_per_day = 50
@@ -133,70 +129,49 @@ def default_get_num_cars_arriving_constructor(
         elif average_cars_per_day == "high":
             average_cars_per_day = 250
 
-    arrival_data_workdays, arrival_data_weekends, _, _ = _get_scenario(
-        user_profile,
-        average_cars_per_day=average_cars_per_day,
-        minutes_per_timestep=env.minutes_per_timestep,
+    arrival_data_workdays, arrival_data_weekends, connection_times, energy_demands = (
+        _load_scenario_csvs(
+            user_profile,
+            average_cars_per_day=average_cars_per_day,
+            minutes_per_timestep=env.minutes_per_timestep,
+        )
     )
 
-    def _pre_sample_poisson(key, arrival_means, num_samples=1000):
-        """Poission is expensive to sample mid-simulation, so we pre-sample it"""
-        data = jax.random.poisson(
+    # --- Car arrival callable ---
+    N_PRESAMPLE = 1000
+    key = jax.random.PRNGKey(seed)
+    key, k_wd, k_we, k1, k2, k3, k4, k5 = jax.random.split(key, 8)
+
+    def _pre_sample_poisson(key, arrival_means, num_samples=N_PRESAMPLE):
+        """Poisson is expensive to sample mid-simulation, so we pre-sample it"""
+        return jax.random.poisson(
             key, lam=arrival_means, shape=(num_samples, len(arrival_means))
         )
-        return data
 
-    key1, key2 = jax.random.split(jax.random.PRNGKey(seed), 2)
-    weekday_data = _pre_sample_poisson(key1, arrival_data_workdays)
-    weekend_data = _pre_sample_poisson(key2, arrival_data_weekends)
+    weekday_data = _pre_sample_poisson(k_wd, arrival_data_workdays)
+    weekend_data = _pre_sample_poisson(k_we, arrival_data_weekends)
     stacked_data = (weekday_data, weekend_data)
 
-    return lambda key, state: _default_get_num_cars_arriving(key, state, stacked_data)
+    def _sample_arrivals(key, state):
+        arrival_means = jax.lax.select(
+            state.is_workday,
+            stacked_data[0][:, state.timestep],
+            stacked_data[1][:, state.timestep],
+        )
+        randint = jax.random.randint(key, (), 0, arrival_means.shape[0])
+        return arrival_means[randint]
 
-
-def _default_fill_EVSES_from_scenario(
-    key: PRNGKeyArray, state: EnvState, data: EVSE
-) -> EVSE:
-    """Default function to fill the EVSEs based on the scenario (user and car profiles)"""
-    # data is an EVSE with each property in shape of (num_samples, num_chargers)
-    # Sample a random sample for each charger and return a EVSE with each property in shape of (num_chargers,)
-    num_samples = data.car_battery_capacity_kw.shape[0]
-    num_chargers = data.car_battery_capacity_kw.shape[1]
-    random_indices = jax.random.randint(key, (num_chargers,), 0, num_samples)
-    charger_indices = jnp.arange(num_chargers)
-
-    def _sample(x):
-        if hasattr(x, "ndim") and x.ndim == 2:
-            return x[random_indices, charger_indices]
-        return x
-
-    return jax.tree.map(_sample, data)
-
-
-def default_fill_EVSES_from_scenario_constructor(
-    env: Chargax,
-    car_profile: Literal["eu", "us", "world"],
-    user_profile: Literal["highway", "residential", "workplace", "shopping"],
-    seed: int = 0,
-) -> Callable[[PRNGKeyArray], EVSE]:
-    """Default function to fill the EVSEs based on the scenario (user and car profiles)"""
-
-    key = jax.random.PRNGKey(seed)
-    car_data = jnp.array(_get_car_data(car_profile))
+    # --- EVSE filling callable ---
+    car_data = jnp.array(_load_car_profiles(car_profile))
     car_frequencies = car_data[:, 0]
     car_profiles = car_data[:, 1:]
 
-    N_PRESAMPLE = 1000
     num_chargers = env.station.num_chargers
-    key, k1, k2, k3, k4, k5 = jax.random.split(key, 6)
     car_indices = jax.random.categorical(
         k1, car_frequencies, shape=(N_PRESAMPLE, num_chargers)
     )
     car_profiles_sampled = car_profiles[car_indices]
 
-    _, _, connection_times, energy_demands = _get_scenario(
-        user_profile, 100, env.minutes_per_timestep
-    )
     connection_times_sampled = connection_times[
         jax.random.randint(k2, (N_PRESAMPLE, num_chargers), 0, len(connection_times))
     ]
@@ -235,78 +210,33 @@ def default_fill_EVSES_from_scenario_constructor(
         car_arrival_battery_kw=car_battery_now_kw,
     )
 
-    return lambda key, _: _default_fill_EVSES_from_scenario(
-        key, _, presampled_flat_evse
-    )
+    def _sample_incoming_cars(key, state):
+        num_samples = presampled_flat_evse.car_battery_capacity_kw.shape[0]
+        n_chargers = presampled_flat_evse.car_battery_capacity_kw.shape[1]
+        random_indices = jax.random.randint(key, (n_chargers,), 0, num_samples)
+        charger_indices = jnp.arange(n_chargers)
+
+        def _sample(x):
+            if hasattr(x, "ndim") and x.ndim == 2:
+                return x[random_indices, charger_indices]
+            return x
+
+        return jax.tree.map(_sample, presampled_flat_evse)
+
+    return _sample_arrivals, _sample_incoming_cars
 
 
-# def sample_cars(self, key: PRNGKeyArray) -> EVSE:
-#         """
-#         Returns a ChargersState based on the current scenario (user and car profiles)
-#         In the returned ChargersState, all connections are filled
-#         with is_car_connected to false. The required number of chargers should then
-#         be connected and then merged with the current ChargersState.
-#         """
-#         chargers_state = self.station.zero_grid().evses_flat
-#         if self.car_profiles in ["eu", "us", "world"]:
-#             car_data = jnp.array(get_car_data(self.car_profiles))
-#             probs = car_data[:, 0]
-#             cars = jax.random.categorical(
-#                 key, probs, shape=(self.station.num_chargers,)
-#             )
-#             tau_car_data = car_data[:, 1]
-#             capacity_car_data = car_data[:, 2]
-#             ac_max_rate_car_data = car_data[:, 3]
-#             dc_max_rate_car_data = car_data[:, 4]
-#             chargers_state = chargers_state.replace(
-#                 car_ac_absolute_max_charge_rate_kw=ac_max_rate_car_data[cars],
-#                 car_ac_optimal_charge_threshold=tau_car_data[cars],
-#                 car_dc_absolute_max_charge_rate_kw=dc_max_rate_car_data[cars],
-#                 car_dc_optimal_charge_threshold=tau_car_data[cars],
-#                 car_battery_capacity_kw=capacity_car_data[cars],
-#             )
+def build_default_grid_price_fn(
+    env: Chargax, dataset: str = "2023_NL", offset: int = 0
+) -> Callable[[EnvState], float]:
+    """Default function to get the electricity prices based on the dataset"""
 
-#         if self.user_profiles in ["highway", "residential", "workplace", "shopping"]:
-#             _, _, connection_times, energy_demands = get_scenario(self.user_profiles)
-#             keys = jax.random.split(key, 3)
-#             connection_times_rnd = jax.random.randint(
-#                 keys[0], (self.station.num_chargers,), 0, 101
-#             )
-#             energy_demands_rnd = jax.random.randint(
-#                 keys[1], (self.station.num_chargers,), 0, 101
-#             )
-#             car_time_till_leave = connection_times[connection_times_rnd].astype(int)
+    resources = r.files("chargax")
+    csv_file = resources.joinpath(DATA_FOLDER, f"electricity_prices_kwh_{dataset}.csv")
+    with open(csv_file, "r") as f:
+        reader = csv.reader(f)
+        data = [list(map(float, row[1:])) for row in list(reader)[1:]]
+    desired_length = 24 * 60 // env.minutes_per_timestep
+    data = jnp.array(_interpolate_data_stepwise(data, desired_length))
 
-#             energy_demands = energy_demands[energy_demands_rnd]
-#             car_desired_battery_percentage = jax.random.uniform(
-#                 keys[2], (self.station.num_chargers,), minval=0.8, maxval=0.95
-#             )
-#             car_desired_kw = (
-#                 chargers_state.car_battery_capacity_kw * car_desired_battery_percentage
-#             )
-#             car_battery_now_kw = car_desired_kw - energy_demands
-#             car_battery_now_kw = jnp.clip(
-#                 car_battery_now_kw,
-#                 0.03 * chargers_state.car_battery_capacity_kw,
-#                 chargers_state.car_battery_capacity_kw,
-#             )
-
-#             if self.user_profiles == "highway":
-#                 charge_sensitive = jax.random.bernoulli(
-#                     keys[2], 0.9, shape=(self.station.num_chargers,)
-#                 )
-#             else:
-#                 charge_sensitive = jax.random.bernoulli(
-#                     keys[2], 0.1, shape=(self.station.num_chargers,)
-#                 )
-
-#             chargers_state = chargers_state.replace(
-#                 car_time_till_leave=car_time_till_leave,
-#                 car_battery_now_kw=car_battery_now_kw,
-#                 car_desired_battery_percentage=car_desired_battery_percentage,
-#                 charge_sensitive=charge_sensitive,
-#             )
-
-#         return chargers_state.replace(
-#             car_arrival_battery_kw=chargers_state.car_battery_now_kw,  # copy the initial battery percentage
-#         )
+    return lambda state: data[state.day_of_year][state.timestep] + offset
