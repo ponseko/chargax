@@ -421,8 +421,18 @@ class ChargingStation(StationSplitter):
                             max_kw_throughput=300.0,
                             efficiency=0.995,
                             connections=[
-                                EVSE(voltage=600, max_current=500),
-                                EVSE(voltage=600, max_current=500),
+                                EVSE(
+                                    voltage=600,
+                                    max_current=500,
+                                    num_chargers=2,
+                                    efficiency=0.995,
+                                ),
+                                EVSE(
+                                    voltage=600,
+                                    max_current=500,
+                                    num_chargers=2,
+                                    efficiency=0.995,
+                                ),
                             ],
                         ),
                         # Slow charger:
@@ -430,8 +440,18 @@ class ChargingStation(StationSplitter):
                             max_kw_throughput=300.0,
                             efficiency=0.995,
                             connections=[
-                                EVSE(voltage=600, max_current=500),
-                                EVSE(voltage=600, max_current=500),
+                                EVSE(
+                                    voltage=230,
+                                    max_current=50,
+                                    num_chargers=4,
+                                    efficiency=0.995,
+                                ),
+                                EVSE(
+                                    voltage=230,
+                                    max_current=50,
+                                    num_chargers=4,
+                                    efficiency=0.995,
+                                ),
                             ],
                         ),
                         # Battery on site:
