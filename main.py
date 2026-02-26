@@ -1,19 +1,19 @@
-import argparse
-
 import jax
 import jaxnasium as jym
 import numpy as np
 from jaxnasium.algorithms import DQN, PPO, SAC
 
-from chargax import Chargax, get_electricity_prices  # noqa: E402
+from chargax import Chargax, ChargingStation
 
 if __name__ == "__main__":
-    env = Chargax(
-        elec_grid_buy_price=get_electricity_prices("2023_NL"),
-        elec_grid_sell_price=get_electricity_prices("2023_NL") - 0.02,
-    )
-    env = jym.LogWrapper(env)
     rng = jax.random.PRNGKey(42)
+
+    # Initialize a default charging station environment from template:
+    charging_station = ChargingStation.init_default_station()
+
+    # Create the environment
+    env = Chargax(station=charging_station)
+    env = jym.LogWrapper(env)
 
     # RL Training with PPO
     total_timesteps = 1_000_000
