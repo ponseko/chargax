@@ -1,5 +1,5 @@
 import datetime
-from dataclasses import asdict, replace
+from dataclasses import replace
 from typing import Callable, Dict, Tuple
 
 import equinox as eqx
@@ -101,9 +101,6 @@ class Chargax(jym.Environment):
 
     price_hour_lookahead: int = 6
     """Number of future hours of electricity prices included in the observation."""
-
-    full_info_dict: bool = False
-    """Whether to return a full detailed info dict or a compact logging-only version."""
 
     default_data_kwargs: Dict = eqx.field(static=True, default_factory=lambda: {})
     """Keyword arguments passed to default data loaders for car/price scenario configuration."""
@@ -481,32 +478,16 @@ class Chargax(jym.Environment):
     def get_info(
         self, state: EnvState, actions, old_state: EnvState = None
     ) -> Dict[str, Array]:
-        if not self.full_info_dict:
-            return {
-                "logging_data": {
-                    "profit": state.profit,
-                    "exceeded_capacity": state.exceeded_capacity,
-                    "total_charged_kw": state.total_charged_kw,
-                    "total_discharged_kw": state.total_discharged_kw,
-                    "rejected_customers": state.rejected_customers,
-                    "uncharged_percentages": state.uncharged_percentages,
-                    "uncharged_kw": state.uncharged_kw,
-                    "charged_overtime": state.charged_overtime,
-                    "charged_undertime": state.charged_undertime,
-                    # "battery_level": state.grid.battery_now,
-                    # "battery_percentage": state.battery_state.battery_percentage,
-                }
-            }
         return {
-            "actions": actions,
-            **asdict(state),
-            # "car_battery_percentage": state.chargers_state.car_battery_percentage,
-            # "car_battery_desired_remaining": state.chargers_state.car_battery_desired_remaining,
-            # "charger_output_now_kw": state.chargers_state.charger_output_now_kw,
-            # "charger_throughput_now_kw": state.chargers_state.charger_throughput_now_kw,
-            # "car_max_current_intake": state.chargers_state.car_max_current_intake,
-            # "car_max_current_outtake": state.chargers_state.car_max_current_outtake,
-            "reward": self.get_reward(old_state, state),
+            "profit": state.profit,
+            "exceeded_capacity": state.exceeded_capacity,
+            "total_charged_kw": state.total_charged_kw,
+            "total_discharged_kw": state.total_discharged_kw,
+            "rejected_customers": state.rejected_customers,
+            "uncharged_percentages": state.uncharged_percentages,
+            "uncharged_kw": state.uncharged_kw,
+            "charged_overtime": state.charged_overtime,
+            "charged_undertime": state.charged_undertime,
         }
 
     def kw_to_kw_this_timestep(self, kw_drawn: Float[Array, "..."]) -> Array:
