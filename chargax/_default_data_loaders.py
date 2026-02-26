@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray
 
 if TYPE_CHECKING:
     from .chargax import EVSE, Chargax, EnvState
@@ -197,7 +197,7 @@ def build_default_scenario(
             k5, 0.1, shape=(N_PRESAMPLE, num_chargers)
         )
 
-    presampled_flat_evse = env.station.zero_grid().evses_flat.replace(
+    presampled_flat_evse = env.station.evses_flat.replace(
         car_ac_absolute_max_charge_rate_kw=car_profiles_sampled[..., 2],
         car_ac_optimal_charge_threshold=car_profiles_sampled[..., 0],
         car_dc_absolute_max_charge_rate_kw=car_profiles_sampled[..., 3],
@@ -240,3 +240,24 @@ def build_default_grid_price_fn(
     data = jnp.array(_interpolate_data_stepwise(data, desired_length))
 
     return lambda state: data[state.day_of_year][state.timestep] + offset
+
+
+def build_leave_cars_fn() -> Callable[[PRNGKeyArray, EVSE], Array]:
+    """Default function to determine which cars leave the station at each timestep
+    This default function is based on the car providing either its desired departure time or
+    its desired battery percentage, and whether the car is charge sensitive or time sensitive.
+    """
+
+    def _leave_cars(key: PRNGKeyArray, ports: EVSE) -> Array:
+        ports.car_time_till_leave
+        ports.car_time_waited
+
+        is_leaving_time_sensitive = ports.car_time_till_leave <= 0
+        is_leaving_charge_sensitive = ports.car_battery_desired_remaining <= 0
+        is_leaving = (is_leaving_charge_sensitive * ports.charge_sensitive) + (
+            is_leaving_time_sensitive * ~ports.charge_sensitive
+        )
+        is_leaving = is_leaving * ports.charger_is_car_connected
+        return is_leaving.astype(bool)
+
+    return _leave_cars

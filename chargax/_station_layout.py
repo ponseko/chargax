@@ -10,8 +10,8 @@ from jaxtyping import Array
 
 
 class StationNode(eqx.Module):
-    max_kw_throughput: float = eqx.field(static=True)
-    efficiency: float = eqx.field(static=True)
+    max_kw_throughput: float
+    efficiency: float
 
     def replace(self, **updates):
         keys, values = zip(*updates.items())
@@ -35,11 +35,10 @@ class StationBattery(StationNode):
     A battery for the hub. Can be used to store excess energy or to provide energy to the grid.
     """
 
+    capacity_kw: float = eqx.field(static=True)
     output_now_kw: float = 0.0  # positive for discharging, negative for charging
-    capacity_kw: float = 100000.0
     battery_now: float = 0.0
-    max_rate_kw: float = 1000.0
-    tau: float = 1.0
+    tau: float = eqx.field(static=True, default=1.0)
     cumulative_efficiency: float = eqx.field(static=True, default=1.0)
 
     @property
@@ -59,8 +58,15 @@ class StationBattery(StationNode):
     def distribute(self, available_from_top: float):
         total_available = available_from_top + self.supplied_power
         scale_factor = jnp.minimum(1.0, total_available / (self.requested_power + 1e-8))
-        scaled_output = self.output_now_kw * scale_factor
-        new_output = jnp.clip(scaled_output, -self.max_rate_kw, self.max_rate_kw)
+        # Scale only charging (negative output); leave discharging untouched
+        new_output = jnp.where(
+            self.output_now_kw < 0,
+            self.output_now_kw * scale_factor,
+            self.output_now_kw,
+        )
+        new_output = jnp.clip(
+            new_output, -self.max_kw_throughput, self.max_kw_throughput
+        )
         return self.replace(output_now_kw=new_output)
 
 
@@ -88,9 +94,9 @@ class EVSE(StationNode):
     charger_current_now: Array
     charger_is_car_connected: Array = eqx.field(converter=jnp.bool_)
 
-    max_current: float = eqx.field(static=True)
-    voltage: float = eqx.field(static=True)
-    cumulative_efficiency: float = eqx.field(static=True, default=1.0)
+    max_current: float  # = eqx.field(static=True)
+    voltage: float  # = eqx.field(static=True)
+    cumulative_efficiency: float  # = eqx.field(static=True, default=1.0)
 
     @property
     def is_dc(self) -> bool:  # Assumption: above 50 kW is DC
@@ -111,10 +117,12 @@ class EVSE(StationNode):
         for field in fields(self):
             setattr(self, field.name, jnp.zeros(num_chargers))
 
-        self.voltage = voltage
-        self.max_current = max_current
-        self.max_kw_throughput = (self.voltage * self.max_current) / 1000.0
-        self.efficiency = efficiency
+        self.max_kw_throughput = jnp.ones(num_chargers) * (
+            (voltage * max_current) / 1000.0
+        )  # max is shared, so distribute should scale by the number of chargers
+        self.voltage = jnp.ones(num_chargers) * voltage
+        self.max_current = jnp.ones(num_chargers) * max_current
+        self.efficiency = jnp.ones(num_chargers) * efficiency
         self.cumulative_efficiency = 1.0  # Set by ChargingStation.__post_init__
 
     @property
@@ -183,6 +191,8 @@ class EVSE(StationNode):
 
     def distribute(self, available_from_top: float):
         budget = jnp.maximum(available_from_top + self.supplied_power, 0.0)
+        max_kw_throughput = self.max_kw_throughput[0]  # Max is shared
+        budget = jnp.minimum(budget, max_kw_throughput)
         scale_factor = jnp.minimum(1.0, budget / (self.requested_power + 1e-8))
 
         # Scale only charging (positive) currents; leave discharging untouched
@@ -219,7 +229,8 @@ class StationSplitter(StationNode):
     @property
     def evses_flat(self) -> EVSE:
         """Return a single EVSE object with all chargers concatenated. The order of chargers is the same as in evses."""
-        return jax.tree.map(lambda *t: jnp.concatenate(t), *self.evses)
+        evses = jax.tree.map(jnp.atleast_1d, self.evses)  # for concatenation
+        return jax.tree.map(lambda *t: jnp.concatenate(t), *evses)
 
     @property
     def batteries(self) -> List["StationBattery"]:
@@ -237,7 +248,8 @@ class StationSplitter(StationNode):
         """Return a single StationBattery object with all batteries concatenated. The order of batteries is the same as in batteries."""
         if not self.batteries:
             return StationBattery(0, 0, 0)  # dummy battery for compatibility
-        return jax.tree.map(lambda *t: jnp.concatenate(t), *self.batteries)
+        batteries = jax.tree.map(jnp.atleast_1d, self.batteries)
+        return jax.tree.map(lambda *t: jnp.concatenate(t), *batteries)
 
     @property
     def num_chargers(self) -> int:
@@ -256,27 +268,24 @@ class StationSplitter(StationNode):
 
     @property
     def requested_power(self) -> float:
-        evse_power = self.evses_flat.requested_power
-        battery_power = self.batteries_flat.requested_power
-        return jnp.sum(evse_power) + jnp.sum(battery_power)
+        return sum(c.requested_power for c in self.connections)
 
     @property
     def supplied_power(self) -> float:
-        evse_power = self.evses_flat.supplied_power
-        battery_power = self.batteries_flat.supplied_power
-        return jnp.sum(evse_power) + jnp.sum(battery_power)
+        return sum(c.supplied_power for c in self.connections)
 
     @property
     def exceeded_power_all_children(self) -> float:
         all_nodes = self._all_descendant_nodes
-        exceeded_per_node = [
-            jnp.maximum(
-                node.requested_power - node.max_kw_throughput,
-                node.supplied_power - node.max_kw_throughput,
-            )
-            for node in all_nodes
-        ]
-        return jnp.sum(jnp.array(exceeded_per_node))
+        requested = jnp.array([n.requested_power for n in all_nodes])
+        supplied = jnp.array([n.supplied_power for n in all_nodes])
+        max_kw = jnp.array(
+            [
+                n.max_kw_throughput[0] if isinstance(n, EVSE) else n.max_kw_throughput
+                for n in all_nodes
+            ]
+        )
+        return jnp.sum(jnp.maximum(requested - max_kw, supplied - max_kw))
 
     def cumulative_efficiency_of(
         self, target: "EVSE | StationBattery", parent_efficiency: float = 1.0
@@ -395,14 +404,43 @@ class ChargingStation(StationSplitter):
                     _set_cumulative_efficiencies(c, eff)
 
         _set_cumulative_efficiencies(self)
-        # convert jnp arrays to np arrays
-        # return jax.tree.map(lambda x: np.array(x) if eqx.is_array(x) else x, self)
 
     @classmethod
-    def init_default_station() -> "ChargingStation":
-        pass
-
-    def zero_grid(self) -> "ChargingStation":
-        """Return a ChargingStation with the same structure but all dynamic EVSE and battery values zeroed."""
-
-        return jax.tree.map(lambda x: jnp.zeros_like(x) if eqx.is_array(x) else x, self)
+    def init_default_station(cls) -> "ChargingStation":
+        """Initializes a station layout with a mix of fast and slow chargers and a battery on site."""
+        return cls(
+            max_kw_throughput=300.0,  # Grid connection max throughput
+            efficiency=1.0,
+            connections=[
+                StationSplitter(
+                    max_kw_throughput=600.0,
+                    efficiency=0.995,
+                    connections=[
+                        # Fast charger:
+                        StationSplitter(
+                            max_kw_throughput=300.0,
+                            efficiency=0.995,
+                            connections=[
+                                EVSE(voltage=600, max_current=500),
+                                EVSE(voltage=600, max_current=500),
+                            ],
+                        ),
+                        # Slow charger:
+                        StationSplitter(
+                            max_kw_throughput=300.0,
+                            efficiency=0.995,
+                            connections=[
+                                EVSE(voltage=600, max_current=500),
+                                EVSE(voltage=600, max_current=500),
+                            ],
+                        ),
+                        # Battery on site:
+                        StationBattery(
+                            capacity_kw=10000.0,
+                            max_kw_throughput=300.0,
+                            efficiency=0.995,
+                        ),
+                    ],
+                ),
+            ],
+        )
