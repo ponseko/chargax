@@ -231,7 +231,7 @@ class Chargax(jym.Environment):
             )
             battery_change = new_desired_battery_level - battery.battery_now
             actual_output_kw = battery_change * (60 / self.minutes_per_timestep)
-            return battery.replace(output_now_kw=actual_output_kw)
+            return battery.replace(throughput_now_kw=actual_output_kw)
 
         actions = jax.tree.map(lambda x: x / self.num_discretization_levels, actions)
 
@@ -278,9 +278,13 @@ class Chargax(jym.Environment):
         real_charged_this_timestep = new_battery - previous_battery
 
         # (dis)charge station batteries:
-        batteries_output_now_kw = self.kw_to_kw_this_timestep(batteries.output_now_kw)
+        batteries_throughput_now_kw = self.kw_to_kw_this_timestep(
+            batteries.throughput_now_kw
+        )
         new_station_battery_level = jnp.clip(
-            batteries.battery_now + batteries_output_now_kw, 0, batteries.capacity_kw
+            batteries.battery_now + batteries_throughput_now_kw,
+            0,
+            batteries.capacity_kw,
         )
         batteries = batteries.replace(battery_now=new_station_battery_level)
 
@@ -301,9 +305,10 @@ class Chargax(jym.Environment):
             real_charged_this_timestep * charging_ports.cumulative_efficiency,
         )
         grid_draw_batteries = jnp.where(
-            batteries_output_now_kw >= 0,
-            batteries_output_now_kw / batteries.cumulative_efficiency,  # charging
-            batteries_output_now_kw * batteries.cumulative_efficiency,  # discharging
+            batteries_throughput_now_kw >= 0,
+            batteries_throughput_now_kw / batteries.cumulative_efficiency,  # charging
+            batteries_throughput_now_kw
+            * batteries.cumulative_efficiency,  # discharging
         )
         total_grid_draw = grid_draw_evses.sum() + grid_draw_batteries.sum()
         elec_price = jax.lax.select(
