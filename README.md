@@ -1,6 +1,6 @@
 # Chargax: A JAX Accelerated EV Charging Simulator
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 
 > [!NOTE]
 > Please refer to the submission branch to reproduce results as presented in the paper.
