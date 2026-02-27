@@ -4,6 +4,7 @@ import numpy as np
 from jaxnasium.algorithms import DQN, PPO, SAC
 
 from chargax import Chargax, ChargingStation
+from chargax.baselines import MaxCharge, Random
 
 if __name__ == "__main__":
     rng = jax.random.PRNGKey(42)
@@ -30,4 +31,13 @@ if __name__ == "__main__":
     agent = agent.train(rng, env)
 
     results = agent.evaluate(rng, env, num_eval_episodes=25)
-    print(f"Average reward over 25 evaluation episodes: {np.mean(results)}")
+    print(f"PPO - Average reward over 25 evaluation episodes: {np.mean(results)}")
+
+    # Compare against baselines:
+    print("Evaluating baselines...")
+    rewards, profits = MaxCharge(env).evaluate(rng, num_eval_episodes=10)
+    print(
+        f"MaxCharge - Average cumulative reward: {np.sum(rewards, axis=1).mean():.2f}"
+    )
+    rewards, profits = Random(env).evaluate(rng, num_eval_episodes=10)
+    print(f"Random - Average cumulative reward: {np.sum(rewards, axis=1).mean():.2f}")
