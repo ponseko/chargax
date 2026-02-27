@@ -52,7 +52,7 @@ class Chargax(jym.Environment):
     elec_customer_sell_price: float = 0.75  # €/kWh
     """Price in €/kWh charged to customers for electricity delivered."""
 
-    get_cars_leaving: Callable[[PRNGKeyArray, EVSE], Array] = build_leave_cars_fn()
+    get_cars_departing: Callable[[PRNGKeyArray, EVSE], Array] = build_leave_cars_fn()
     """Callable that determines which cars leave at each timestep given RNG and EVSE state."""
 
     get_num_cars_arriving: Callable[[PRNGKeyArray, EnvState], int] = None
@@ -345,7 +345,7 @@ class Chargax(jym.Environment):
             car_time_waited=new_time_waited,
         )
 
-        cars_leaving = self.get_cars_leaving(key, ports)
+        cars_leaving = self.get_cars_departing(key, ports)
 
         uncharged_percentages = (
             cars_leaving * jnp.maximum(ports.car_battery_desired_remaining, 0)
