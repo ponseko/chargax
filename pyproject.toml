@@ -7,7 +7,10 @@ authors = [
     { name = "Koen Ponse", email = "k.ponse@liacs.leidenuniv.nl" }
 ]
 requires-python = ">=3.13"
-dependencies = ['jaxnasium[algs]>=0.0.29']
+dependencies = [
+    "jax-datetime>=0.1.0",
+    'jaxnasium[algs]>=0.0.29',
+]
 
 [build-system]
 requires = ["hatchling"]

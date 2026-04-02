@@ -1,14 +1,15 @@
-import datetime
-from dataclasses import replace
 from typing import Callable, Dict, Tuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import jaxnasium as jym
 import numpy as np
 from jaxnasium import TimeStep
 from jaxtyping import Array, Float, PRNGKeyArray
+
+from chargax._util import year_and_doy
 
 from ._default_data_loaders import (
     build_default_grid_price_fn,
@@ -20,17 +21,32 @@ from ._station_layout import EVSE, ChargingStation, StationBattery
 
 class EnvState(jym.EnvState):
     grid: ChargingStation
-    day_of_year: int
+    datetime: jdt.Datetime
     timestep: int = 0
+
+    @property
+    def year_and_doy(self):
+        return year_and_doy(self.datetime)
+
+    @property
+    def year(self):
+        return self.year_and_doy[0]
+
+    @property
+    def day_of_year(self):
+        return self.year_and_doy[1]
+
+    @property
+    def day_of_week(self):
+        """0-6 for Monday-Sunday. 1970-01-01 was a Thursday (3), which is our reference."""
+        return (self.day_of_year + 3) % 7
 
     @property
     def is_workday(self) -> bool:
         """
         Determine if the current day is a workday (Monday to Friday).
         """
-        offset = datetime.datetime(2024, 1, 1).weekday()  # 0 (change year if needed)
-        day_of_week = (self.day_of_year + offset) % 7
-        return day_of_week < 5
+        return self.day_of_week < 5
 
     # Reward variables:
     profit: float = 0.0
@@ -48,6 +64,10 @@ class EnvState(jym.EnvState):
 class Chargax(jym.Environment):
     station: ChargingStation
     """The charging station layout defining EVSEs, batteries, and power limits."""
+
+    simulation_starting_year: int = 2024
+    """Calander year for the simulation. Default reset() will randomly sample a day within this year and set
+    the datetime accordingly in the state. This may then be used to query time-dependent data."""
 
     elec_customer_sell_price: float = 0.75  # €/kWh
     """Price in €/kWh charged to customers for electricity delivered."""
@@ -150,9 +170,12 @@ class Chargax(jym.Environment):
 
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
 
-        state = EnvState(
-            day_of_year=jax.random.randint(key, (), 0, 365), grid=self.station
+        random_day_of_year = jax.random.randint(key, (), 0, 365)
+        year = self.simulation_starting_year
+        random_day = jdt.to_datetime(f"{int(year)}-01-01") + jdt.Timedelta(
+            days=random_day_of_year
         )
+        state = EnvState(datetime=random_day, grid=self.station)
         observation = self.get_observation(state)
         return observation, state
 
@@ -194,10 +217,14 @@ class Chargax(jym.Environment):
             charging_ports
         ).update_batteries_from_flat(batteries)
 
+        timestep_elapsed_time = jdt.Timedelta(seconds=self.minutes_per_timestep * 60)
         new_state = new_state._replace(
             grid=updated_grid,
             timestep=old_state.timestep + 1,
+            datetime=old_state.datetime + timestep_elapsed_time,
         )
+
+        jax.debug.breakpoint()
 
         timestep_object = jym.TimeStep(
             observation=self.get_observation(new_state),
