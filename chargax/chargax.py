@@ -224,8 +224,6 @@ class Chargax(jym.Environment):
             datetime=old_state.datetime + timestep_elapsed_time,
         )
 
-        jax.debug.breakpoint()
-
         timestep_object = jym.TimeStep(
             observation=self.get_observation(new_state),
             reward=self.get_reward(old_state, new_state),
