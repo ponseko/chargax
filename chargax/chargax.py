@@ -370,6 +370,9 @@ class Chargax(jym.Environment):
         )
 
         cars_leaving = self.get_cars_departing(key, ports)
+        cars_leaving = (
+            cars_leaving * ports.charger_is_car_connected
+        )  # Only consider connected cars for leaving
 
         uncharged_percentages = (
             cars_leaving * jnp.maximum(ports.car_battery_desired_remaining, 0)
