@@ -56,6 +56,7 @@ class EnvState(jym.EnvState):
     charged_undertime: int = 0
     rejected_customers: int = 0
     served_customers: int = 0
+    customer_satisfaction: float = 0.0  # unused in base version
     exceeded_capacity: float = 0.0
     total_charged_kw: float = 0.0
     total_discharged_kw: float = 0.0
