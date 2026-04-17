@@ -370,10 +370,21 @@ class Chargax(jym.Environment):
         )
 
         cars_leaving = self.get_cars_departing(key, ports)
-        cars_leaving = (
-            cars_leaving * ports.charger_is_car_connected
+        cars_leaving = (cars_leaving * ports.charger_is_car_connected).astype(
+            bool
         )  # Only consider connected cars for leaving
 
+        state = self.set_customer_satisfaction_values(state, ports, cars_leaving)
+
+        ports = ports.replace(
+            charger_is_car_connected=ports.charger_is_car_connected * ~cars_leaving,
+        )
+
+        return state, ports
+
+    def set_customer_satisfaction_values(
+        self, state: EnvState, ports: EVSE, cars_leaving: Array
+    ) -> EnvState:
         uncharged_percentages = (
             cars_leaving * jnp.maximum(ports.car_battery_desired_remaining, 0)
         ).sum()
@@ -386,23 +397,16 @@ class Chargax(jym.Environment):
             .astype(int)
         )  # Use previous time till leave to calculate overtime
         charged_undertime = (
-            (cars_leaving * jnp.maximum(0, new_time_till_leave)).sum().astype(int)
+            (cars_leaving * jnp.maximum(0, ports.car_time_till_leave)).sum().astype(int)
         )
         num_cars_leaving = cars_leaving.sum()
-
-        ports = ports.replace(
-            charger_is_car_connected=ports.charger_is_car_connected * ~cars_leaving,
-        )
-
-        state = state._replace(
+        return state._replace(
             uncharged_percentages=state.uncharged_percentages + uncharged_percentages,
             uncharged_kw=state.uncharged_kw + uncharged_kw,
             charged_overtime=state.charged_overtime + charged_overtime,
             charged_undertime=state.charged_undertime + charged_undertime,
             left_customers=state.left_customers + num_cars_leaving,
         )
-
-        return state, ports
 
     def add_new_cars(
         self, key: PRNGKeyArray, state: EnvState, ports: EVSE
