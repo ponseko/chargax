@@ -55,7 +55,7 @@ class EnvState(jym.EnvState):
     charged_overtime: int = 0
     charged_undertime: int = 0
     rejected_customers: int = 0
-    left_customers: int = 0
+    served_customers: int = 0
     exceeded_capacity: float = 0.0
     total_charged_kw: float = 0.0
     total_discharged_kw: float = 0.0
@@ -405,7 +405,7 @@ class Chargax(jym.Environment):
             uncharged_kw=state.uncharged_kw + uncharged_kw,
             charged_overtime=state.charged_overtime + charged_overtime,
             charged_undertime=state.charged_undertime + charged_undertime,
-            left_customers=state.left_customers + num_cars_leaving,
+            served_customers=state.served_customers + num_cars_leaving,
         )
 
     def add_new_cars(
