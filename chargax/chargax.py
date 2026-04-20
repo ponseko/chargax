@@ -22,6 +22,7 @@ from ._station_layout import EVSE, ChargingStation, StationBattery
 class EnvState(jym.EnvState):
     grid: ChargingStation
     datetime: jdt.Datetime
+    elec_customer_sell_price: float
     timestep: int = 0
 
     @property
@@ -71,7 +72,8 @@ class Chargax(jym.Environment):
     the datetime accordingly in the state. This may then be used to query time-dependent data."""
 
     elec_customer_sell_price: float = 0.75  # €/kWh
-    """Price in €/kWh charged to customers for electricity delivered."""
+    """Price in €/kWh charged to customers for electricity delivered. This value is also set on the state and
+    therefor may be dynamically adjusted."""
 
     get_cars_departing: Callable[[PRNGKeyArray, EVSE], Array] = build_leave_cars_fn()
     """Callable that determines which cars leave at each timestep given RNG and EVSE state."""
@@ -176,7 +178,11 @@ class Chargax(jym.Environment):
         random_day = jdt.to_datetime(f"{int(year)}-01-01") + jdt.Timedelta(
             days=random_day_of_year
         )
-        state = EnvState(datetime=random_day, grid=self.station)
+        state = EnvState(
+            datetime=random_day,
+            grid=self.station,
+            elec_customer_sell_price=self.elec_customer_sell_price,
+        )
         observation = self.get_observation(state)
         return observation, state
 
@@ -319,7 +325,7 @@ class Chargax(jym.Environment):
             - charging_ports.car_discharged_this_session_kw,
             0.0,
         ).sum()
-        revenue = energy_sold * self.elec_customer_sell_price
+        revenue = energy_sold * state.elec_customer_sell_price
         discharged_this_session = (
             charging_ports.car_discharged_this_session_kw + -real_charged_this_timestep
         ).clip(0)
