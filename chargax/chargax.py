@@ -273,14 +273,15 @@ class Chargax(jym.Environment):
             actions["evses"],
             is_leaf=lambda x: isinstance(x, EVSE),
         )
-        new_batteries = jax.tree.map(
-            _battery_action,
-            state.grid.batteries,
-            actions["batteries"],
-            is_leaf=lambda x: isinstance(x, StationBattery),
-        )
         updated_grid = state.grid.update_evses_from_list(new_evses)
-        updated_grid = updated_grid.update_batteries_from_list(new_batteries)
+        if "batteries" in actions:
+            new_batteries = jax.tree.map(
+                _battery_action,
+                state.grid.batteries,
+                actions["batteries"],
+                is_leaf=lambda x: isinstance(x, StationBattery),
+            )
+            updated_grid = updated_grid.update_batteries_from_list(new_batteries)
 
         if self.renormalize_currents:
             updated_grid = updated_grid.distribute()
