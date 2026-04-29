@@ -280,7 +280,7 @@ class StationSplitter(StationNode):
 
     @property
     def exceeded_power_all_children(self) -> float:
-        all_nodes = self._all_descendant_nodes
+        all_nodes = [self] + self._all_descendant_nodes
         requested = jnp.array([n.requested_power for n in all_nodes])
         supplied = jnp.array([n.supplied_power for n in all_nodes])
         max_kw = jnp.array(
@@ -289,7 +289,9 @@ class StationSplitter(StationNode):
                 for n in all_nodes
             ]
         )
-        return jnp.sum(jnp.maximum(requested - max_kw, supplied - max_kw))
+        over_requested = jnp.maximum(0.0, requested - max_kw)
+        over_supplied = jnp.maximum(0.0, supplied - max_kw)
+        return jnp.sum(over_requested) + jnp.sum(over_supplied)
 
     def cumulative_efficiency_of(
         self, target: "EVSE | StationBattery", parent_efficiency: float = 1.0
