@@ -286,10 +286,7 @@ class Chargax(jym.Environment):
         if self.renormalize_currents:
             updated_grid = updated_grid.distribute()
 
-        if self.allow_discharging:
-            exceeded_capacity = updated_grid.exceeded_power_all_children
-        else:
-            exceeded_capacity = 0.0
+        exceeded_capacity = updated_grid.exceeded_power_all_children
 
         return state._replace(
             grid=updated_grid,
