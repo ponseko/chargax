@@ -73,7 +73,7 @@ class StationBattery(StationNode):
     A battery for the hub. Can be used to store excess energy or to provide energy to the grid.
     """
 
-    capacity_kw: float = eqx.field(static=True)
+    capacity_kw: float
     throughput_now_kw: float = 0.0  # positive for charging, negative for discharging
     battery_now: float = 0.0
     tau: float = eqx.field(static=True, default=1.0)
