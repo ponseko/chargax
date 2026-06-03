@@ -29,6 +29,11 @@ class StationNode(eqx.Module):
         """Returns the total power supplied to the grid by this node/subtree in kW"""
         pass
 
+    @abstractmethod
+    def distribute(self, available_from_top: float):
+        """Distribute the available power to the node/subtree"""
+        pass
+
 
 class StationBattery(StationNode):
     """
@@ -60,13 +65,17 @@ class StationBattery(StationNode):
         return jnp.maximum(0.0, -self.throughput_now_kw)
 
     def distribute(self, available_from_top: float):
-        total_available = available_from_top + self.supplied_power
-        scale_factor = jnp.minimum(1.0, total_available / (self.requested_power + 1e-8))
-        # Scale only charging (negative output); leave discharging untouched
+        charging_budget = jnp.maximum(available_from_top, 0.0)
+        discharge_budget = jnp.maximum(-available_from_top, 0.0)
+        charge_scale = jnp.minimum(1.0, charging_budget / (self.requested_power + 1e-8))
         new_output = jnp.where(
             self.throughput_now_kw > 0,
-            self.throughput_now_kw * scale_factor,
-            self.throughput_now_kw,
+            self.throughput_now_kw * charge_scale,
+            jnp.where(
+                available_from_top < 0,
+                jnp.maximum(self.throughput_now_kw, -discharge_budget),
+                self.throughput_now_kw,
+            ),
         )
         new_output = jnp.clip(
             new_output, -self.max_kw_throughput, self.max_kw_throughput
@@ -194,16 +203,21 @@ class EVSE(StationNode):
         )  # add small value to avoid division by zero
 
     def distribute(self, available_from_top: float):
-        budget = jnp.maximum(available_from_top + self.supplied_power, 0.0)
-        max_kw_throughput = self.max_kw_throughput[0]  # Max is shared
-        budget = jnp.minimum(budget, max_kw_throughput)
-        scale_factor = jnp.minimum(1.0, budget / (self.requested_power + 1e-8))
-
-        # Scale only charging (positive) currents; leave discharging untouched
+        max_kw = self.max_kw_throughput[0]  # shared across chargers
+        charging_budget = jnp.minimum(
+            jnp.maximum(available_from_top + self.supplied_power, 0.0), max_kw
+        )
+        charge_scale = jnp.minimum(1.0, charging_budget / (self.requested_power + 1e-8))
+        discharge_budget = jnp.maximum(-available_from_top, 0.0)
+        max_discharge_current = discharge_budget * 1000.0 / (self.voltage + 1e-8)
         new_current = jnp.where(
             self.charger_current_now > 0,
-            self.charger_current_now * scale_factor,
-            self.charger_current_now,
+            self.charger_current_now * charge_scale,
+            jnp.where(
+                available_from_top < 0,
+                jnp.maximum(self.charger_current_now, -max_discharge_current),
+                self.charger_current_now,
+            ),
         )
         return self.replace(charger_current_now=new_current)
 
@@ -321,11 +335,20 @@ class StationSplitter(StationNode):
 
         surplus = jnp.sum(jnp.maximum(0.0, -net_flows))  # energy supplied (V2G)
         deficit = jnp.sum(jnp.maximum(0.0, net_flows))  # energy demanded
-        total_available = available_power + surplus
+        total_available = jnp.minimum(available_power + surplus, self.max_kw_throughput)
         scale_factor = jnp.minimum(1.0, total_available / (deficit + 1e-8))
 
-        # Scale only demanding (positive) flows; leave supplying (negative) flows untouched
+        # Pass 1: scale demanding (positive) flows
         scaled = jnp.where(net_flows > 0, net_flows * scale_factor, net_flows)
+
+        # Pass 2: cap supplying (negative) flows so local demand + export fits node throughput.
+        scaled_deficit = jnp.sum(jnp.maximum(0.0, scaled))
+        supply_total = jnp.sum(jnp.maximum(0.0, -net_flows))
+        max_supply_allowed = scaled_deficit + jnp.maximum(
+            0.0, self.max_kw_throughput - scaled_deficit
+        )
+        supply_scale = jnp.minimum(1.0, max_supply_allowed / (supply_total + 1e-8))
+        scaled = jnp.where(net_flows < 0, scaled * supply_scale, scaled)
 
         return self.replace(
             connections=[c.distribute(net) for c, net in zip(self.connections, scaled)]
