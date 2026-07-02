@@ -16,7 +16,7 @@ from ._default_data_loaders import (
     build_default_scenario,
     build_leave_cars_fn,
 )
-from ._station_layout import EVSE, ChargingStation, StationBattery
+from ._station_layout import EVSE, ChargingStation, PassiveNode, StationBattery
 
 
 class EnvState(jym.EnvState):
@@ -183,6 +183,7 @@ class Chargax(jym.Environment):
             grid=self.station,
             elec_customer_sell_price=self.elec_customer_sell_price,
         )
+        state = self.set_passive_throughputs(state)
         observation = self.get_observation(state)
         return observation, state
 
@@ -241,8 +242,28 @@ class Chargax(jym.Environment):
 
         return timestep_object, new_state
 
+    def set_passive_throughputs(self, state: EnvState) -> EnvState:
+        """Set uncontrollable passive loads from their load profiles (kW rate for this step)."""
+
+        def _passive_throughput(passive: PassiveNode) -> PassiveNode:
+            load_kw = passive.get_current_load(state)
+            return passive.replace(
+                throughput_now_kw=jnp.asarray(load_kw, dtype=jnp.float32)
+            )
+
+        if not state.grid.passives:
+            return state
+
+        new_passives = jax.tree.map(
+            _passive_throughput,
+            state.grid.passives,
+            is_leaf=lambda x: isinstance(x, PassiveNode),
+        )
+        return state._replace(grid=state.grid.update_passives_from_list(new_passives))
+
     def set_charging_currents(self, state: EnvState, actions: Array) -> EnvState:
         """Set new currents and power levels based on actions"""
+        state = self.set_passive_throughputs(state)
 
         def _evse_action(evse: EVSE, action: Array) -> EVSE:
             if self.allow_discharging:
@@ -339,6 +360,7 @@ class Chargax(jym.Environment):
             batteries_throughput_now_kw
             * batteries.cumulative_efficiency,  # discharging
         )
+        # NOTE: The draw / supply of passives is not included.
         total_grid_draw = grid_draw_evses.sum() + grid_draw_batteries.sum()
         elec_price = jax.lax.select(
             total_grid_draw >= 0,
@@ -458,6 +480,7 @@ class Chargax(jym.Environment):
         observations = {
             "evses": state.grid.evses,
             "batteries": state.grid.batteries,
+            "passives": state.grid.passives,
         }
 
         # Get future prices
