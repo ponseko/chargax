@@ -64,6 +64,12 @@ class PassiveNode(StationNode):
         """Power supplied back to the grid (discharging the battery) in kW, always >= 0."""
         return jnp.maximum(0.0, -self.throughput_now_kw)
 
+    @property
+    def _feasible_net(self) -> float:
+        """Net power (requested - supplied) this node presents upstream. Passive
+        loads are uncontrollable, so their raw net is always feasible."""
+        return self.requested_power - self.supplied_power
+
     def distribute(self, available_from_top: float):
         return self  # no distribution needed for PassiveNode
 
@@ -96,6 +102,13 @@ class StationBattery(StationNode):
     def supplied_power(self) -> float:
         """Power supplied back to the grid (discharging the battery) in kW, always >= 0."""
         return jnp.maximum(0.0, -self.throughput_now_kw)
+
+    @property
+    def _feasible_net(self) -> float:
+        """Net power this battery can actually present upstream, bounded by its
+        own rating (it can neither charge nor discharge past max_kw_throughput)."""
+        net = self.requested_power - self.supplied_power
+        return jnp.clip(net, -self.max_kw_throughput, self.max_kw_throughput)
 
     def distribute(self, available_from_top: float):
         charging_budget = jnp.maximum(available_from_top, 0.0)
@@ -202,6 +215,15 @@ class EVSE(StationNode):
         return jnp.sum(jnp.maximum(0.0, -self.power_output))
 
     @property
+    def _feasible_net(self):
+        """Net power this EVSE can actually present upstream. Charge/discharge on
+        different ports of the same EVSE offset each other internally.
+        The rating is shared across chargers."""
+        max_kw = self.max_kw_throughput[0]
+        net = self.requested_power - self.supplied_power
+        return jnp.clip(net, -max_kw, max_kw)
+
+    @property
     def car_max_current_intake(self) -> Array:
         return self._car_max_current(self.car_battery_percentage)
 
@@ -237,20 +259,21 @@ class EVSE(StationNode):
 
     def distribute(self, available_from_top: float):
         max_kw = self.max_kw_throughput[0]  # shared across chargers
+        # Charging side: charging may be boosted by simultaneous discharge on
+        # sibling ports (internal V2G) but never exceeds the shared rating.
         charging_budget = jnp.minimum(
             jnp.maximum(available_from_top + self.supplied_power, 0.0), max_kw
         )
         charge_scale = jnp.minimum(1.0, charging_budget / (self.requested_power + 1e-8))
-        discharge_budget = jnp.maximum(-available_from_top, 0.0)
-        max_discharge_current = discharge_budget * 1000.0 / (self.voltage + 1e-8)
+        charge_met = self.requested_power * charge_scale
+        export_budget = jnp.maximum(-available_from_top, 0.0)
+        max_supply = jnp.minimum(max_kw, charge_met + export_budget)
+        discharge_scale = jnp.minimum(1.0, max_supply / (self.supplied_power + 1e-8))
+
         new_current = jnp.where(
             self.charger_current_now > 0,
             self.charger_current_now * charge_scale,
-            jnp.where(
-                available_from_top < 0,
-                jnp.maximum(self.charger_current_now, -max_discharge_current),
-                self.charger_current_now,
-            ),
+            self.charger_current_now * discharge_scale,
         )
         return self.replace(charger_current_now=new_current)
 
@@ -346,19 +369,35 @@ class StationSplitter(StationNode):
         return sum(c.supplied_power for c in self.connections)
 
     @property
+    def _feasible_net(self) -> float:
+        """Net power this subtree can actually present to its parent.
+
+        At most ``min(deficit, max_kw)`` of demand can be met and at most
+        ``min(surplus, max_kw)`` of supply can be sourced, so the leftover that
+        actually crosses to the parent connection is:
+
+            net = max(0, min(deficit, cap) - surplus)      # residual import
+                - max(0, min(surplus, cap) - deficit)      # residual export
+        """
+        nets = jnp.array([c._feasible_net for c in self.connections])
+        deficit = jnp.sum(jnp.maximum(0.0, nets))
+        surplus = jnp.sum(jnp.maximum(0.0, -nets))
+        cap = self.max_kw_throughput
+        residual_import = jnp.maximum(0.0, jnp.minimum(deficit, cap) - surplus)
+        residual_export = jnp.maximum(0.0, jnp.minimum(surplus, cap) - deficit)
+        return residual_import - residual_export
+
+    @property
     def exceeded_power_all_children(self) -> float:
         all_nodes = [self] + self._all_descendant_nodes
-        requested = jnp.array([n.requested_power for n in all_nodes])
-        supplied = jnp.array([n.supplied_power for n in all_nodes])
+        net = jnp.array([n.requested_power - n.supplied_power for n in all_nodes])
         max_kw = jnp.array(
             [
                 n.max_kw_throughput[0] if isinstance(n, EVSE) else n.max_kw_throughput
                 for n in all_nodes
             ]
         )
-        over_requested = jnp.maximum(0.0, requested - max_kw)
-        over_supplied = jnp.maximum(0.0, supplied - max_kw)
-        return jnp.sum(over_requested) + jnp.sum(over_supplied)
+        return jnp.sum(jnp.maximum(0.0, jnp.abs(net) - max_kw))
 
     def cumulative_efficiency_of(
         self, target: "EVSE | StationBattery", parent_efficiency: float = 1.0
@@ -378,12 +417,14 @@ class StationSplitter(StationNode):
 
         if available_from_top is None:  # Called on grid connection
             available_from_top = self.max_kw_throughput
+            # The grid connection itself may export up to its own rating.
+            export_budget = self.max_kw_throughput
+        else:
+            export_budget = jnp.maximum(0.0, -available_from_top)
 
         connections = self.connections
         passive_mask = jnp.array([isinstance(c, PassiveNode) for c in connections])
-        net_flows = jnp.array(
-            [c.requested_power - c.supplied_power for c in connections]
-        )
+        net_flows = jnp.array([c._feasible_net for c in connections])
 
         passive_requested = sum(
             c.requested_power for c in connections if isinstance(c, PassiveNode)
@@ -414,9 +455,19 @@ class StationSplitter(StationNode):
         # Pass 2: cap controllable supply only (passive export is never scaled)
         scaled_deficit = jnp.sum(jnp.maximum(0.0, scaled))
         controllable_supply_total = jnp.sum(jnp.maximum(0.0, -controllable_net))
-        max_supply_allowed = scaled_deficit + jnp.maximum(
+
+        # (a) The busbar can source at most its own rating (local circulation).
+        gross_supply_cap = scaled_deficit + jnp.maximum(
             0.0, self.max_kw_throughput - scaled_deficit
         )
+        # (b) The net power pushed upstream (requested - supplied) must not drop
+        #     below -export_budget, otherwise the parent connection is overloaded.
+        #     net = passive_net + demand_met - controllable_supply >= -export_budget
+        passive_net = jnp.sum(jnp.where(passive_mask, net_flows, 0.0))
+        demand_met = jnp.sum(jnp.where((~passive_mask) & (net_flows > 0), scaled, 0.0))
+        net_export_cap = jnp.maximum(0.0, passive_net + demand_met + export_budget)
+
+        max_supply_allowed = jnp.minimum(gross_supply_cap, net_export_cap)
         supply_scale = jnp.minimum(
             1.0, max_supply_allowed / (controllable_supply_total + 1e-8)
         )

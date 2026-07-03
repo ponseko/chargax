@@ -1,3 +1,4 @@
+# ruff: noqa: F401
 import jax
 import jax.numpy as jnp
 import jaxnasium as jym
