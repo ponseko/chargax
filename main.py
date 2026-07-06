@@ -8,6 +8,8 @@ from jaxtyping import Array, PRNGKeyArray
 
 from chargax import EVSE, Chargax, ChargingStation
 from chargax.baselines import MaxCharge, Random
+from chargax.scenarios import list_scenarios, build_scenario, SCENARIOS
+
 
 if __name__ == "__main__":
     rng = jax.random.PRNGKey(42)
