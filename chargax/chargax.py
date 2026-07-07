@@ -116,6 +116,9 @@ class Chargax(jym.Environment):
     minutes_per_timestep: int = 5
     """Duration of each simulation timestep in minutes."""
 
+    simulation_length_days: int = 1
+    """Number of days to simulate per episode. The environment will terminate after this many days."""
+
     renormalize_currents: bool = True
     """Whether to redistribute currents across chargers to respect shared capacity constraints."""
 
@@ -130,7 +133,11 @@ class Chargax(jym.Environment):
 
     @property
     def max_episode_steps(self) -> int:
-        return int(24 * 60 / self.minutes_per_timestep)  # Simulate one day
+        return int(24 * 60 // self.minutes_per_timestep) * self.simulation_length_days
+
+    @property
+    def includes_battery(self) -> bool:
+        return bool(self.station.batteries)
 
     def __post_init__(self):
         if self.get_num_cars_arriving is None or self.get_new_cars_arriving is None:
