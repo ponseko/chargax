@@ -89,6 +89,17 @@ class Chargax(jym.Environment):
 
     get_grid_sell_price: Callable[[EnvState], float] = None
     """Callable that returns the grid electricity sell price in €/kWh for the current state."""
+    
+    # -------------------------------------
+    get_elec_customer_sell_price: Callable[[EnvState], float] = None
+    """Callable that returns the dynamic price in €/kWh for the current state."""
+
+    pv_production: Callable[[EnvState], float] = None
+    """Callable that returns the pv production for the current state."""
+
+    base_load: Callable[[PRNGKeyArray, EnvState], float] = None
+    """Callable that returns the base load for the current state."""
+    # -------------------------------------
 
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
@@ -171,6 +182,12 @@ class Chargax(jym.Environment):
                     ),
                 )
 
+        # Allows for 0 profit, which is needed for some instances of the problem. 
+        # if self.get_elec_customer_sell_price is None:
+        #     self.__setattr__("get_elec_customer_sell_price", self.get_grid_buy_price)
+        # Initialise the PV production and base load here. 
+
+
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
 
         random_day_of_year = jax.random.randint(key, (), 0, 365)
@@ -244,7 +261,8 @@ class Chargax(jym.Environment):
 
     def set_passive_throughputs(self, state: EnvState) -> EnvState:
         """Set uncontrollable passive loads from their load profiles (kW rate for this step)."""
-
+        
+        # Is this the base laod? 
         def _passive_throughput(passive: PassiveNode) -> PassiveNode:
             load_kw = passive.get_current_load(state)
             return passive.replace(
@@ -344,7 +362,15 @@ class Chargax(jym.Environment):
             - charging_ports.car_discharged_this_session_kw,
             0.0,
         ).sum()
-        revenue = energy_sold * state.elec_customer_sell_price
+
+        #------------------------------------------------
+        customer_price = (
+            self.get_elec_customer_sell_price(state) if self.get_elec_customer_sell_price is not None
+            else state.elec_customer_sell_price
+        )
+        revenue = energy_sold * customer_price
+        #-----------------------------------------------
+
         discharged_this_session = (
             charging_ports.car_discharged_this_session_kw + -real_charged_this_timestep
         ).clip(0)

@@ -9,7 +9,6 @@ import wandb
 from chargax import EVSE, Chargax, ChargingStation
 from chargax.baselines import MaxCharge, Random
 from chargax.scenarios._scenarios_config import build_scenario, list_scenarios
-from chargax.scenarios._scenarios_station_layout import init_default_homecharger, init_default_station
 from wandb_logger import wandb_logger
 
 
@@ -31,10 +30,7 @@ if __name__ == "__main__":
         },
     )
 
-    charging_station = ChargingStation.init_default_homecharger()
-
-
-    env = build_scenario("home")
+    env = build_scenario("basic")
     env = jym.LogWrapper(env)
 
     # RL Training with PPO

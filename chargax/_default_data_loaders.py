@@ -111,7 +111,7 @@ def build_default_scenario(
     user_profile: Literal[
         "highway", "residential", "workplace", "shopping"
     ] = "highway",
-    average_cars_per_day: int | Literal["low", "medium", "high"] = "medium",
+    average_cars_per_day: int | Literal["home", "low", "medium", "high"] = "medium",
     seed: int = 0,
 ) -> tuple[
     Callable[[PRNGKeyArray, EnvState], int], Callable[[PRNGKeyArray, EnvState], EVSE]
@@ -121,13 +121,16 @@ def build_default_scenario(
     Returns:
         A tuple of (get_num_cars_arriving, get_new_cars_arriving) callables.
     """
-    if average_cars_per_day in ["low", "medium", "high"]:
-        if average_cars_per_day == "low":
+    if average_cars_per_day in ["home", "low", "medium", "high"]:
+        if average_cars_per_day == "home":
+            average_cars_per_day = 1
+        elif average_cars_per_day == "low":
             average_cars_per_day = 50
         elif average_cars_per_day == "medium":
             average_cars_per_day = 100
         elif average_cars_per_day == "high":
             average_cars_per_day = 250
+        
 
     arrival_data_workdays, arrival_data_weekends, connection_times, energy_demands = (
         _load_scenario_csvs(
