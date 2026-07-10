@@ -136,6 +136,9 @@ class Chargax(jym.Environment):
     price_hour_lookahead: int = 6
     """Number of future hours of electricity prices included in the observation."""
 
+    price_hour_lookback: int = 0
+    """Number of past hours of electricity prices included in the observation."""
+
     default_data_kwargs: Dict = eqx.field(static=True, default_factory=lambda: {})
     """Keyword arguments passed to default data loaders for car/price scenario configuration."""
 
@@ -181,12 +184,6 @@ class Chargax(jym.Environment):
                         self, dataset=grid_price_dataset, offset=sell_price_margin
                     ),
                 )
-
-        # Allows for 0 profit, which is needed for some instances of the problem. 
-        # if self.get_elec_customer_sell_price is None:
-        #     self.__setattr__("get_elec_customer_sell_price", self.get_grid_buy_price)
-        # Initialise the PV production and base load here. 
-
 
     def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
 
@@ -262,7 +259,7 @@ class Chargax(jym.Environment):
     def set_passive_throughputs(self, state: EnvState) -> EnvState:
         """Set uncontrollable passive loads from their load profiles (kW rate for this step)."""
         
-        # Is this the base laod? 
+        # Is this the base load? 
         def _passive_throughput(passive: PassiveNode) -> PassiveNode:
             load_kw = passive.get_current_load(state)
             return passive.replace(
@@ -511,25 +508,61 @@ class Chargax(jym.Environment):
 
         # Get future prices
         timesteps_per_hour = 60 // self.minutes_per_timestep
-        hour_offsets = jnp.arange(self.price_hour_lookahead) * timesteps_per_hour
-        future_timesteps = state.timestep + hour_offsets
-        future_prices = jax.vmap(
-            lambda t: self.get_grid_buy_price(state._replace(timestep=t))
-        )(future_timesteps)
-        future_sell_prices = jax.vmap(
-            lambda t: self.get_grid_sell_price(state._replace(timestep=t))
-        )(future_timesteps)
+        
+        if self.price_hour_lookahead > 0:
+            hour_offsets = jnp.arange(self.price_hour_lookahead) * timesteps_per_hour
+            future_timesteps = state.timestep + hour_offsets
+            future_prices = jax.vmap(
+                lambda t: self.get_grid_buy_price(state._replace(timestep=t))
+            )(future_timesteps)
+            future_sell_prices = jax.vmap(
+                lambda t: self.get_grid_sell_price(state._replace(timestep=t))
+            )(future_timesteps)
 
-        # Calculate price differences for all lookahead periods
-        price_diffs_buy = future_prices[1:] - future_prices[0]  # all diffs from now
-        price_diffs_sell = future_sell_prices[1:] - future_sell_prices[0]  # ""
+            # Calculate price differences for all lookahead periods
+            price_diffs_buy = future_prices[1:] - future_prices[0]  # all diffs from now
+            price_diffs_sell = future_sell_prices[1:] - future_sell_prices[0]  # ""
+
+            observations.update(
+                {
+                    "future_buy_prices": future_prices,
+                    "future_sell_prices": future_sell_prices,
+                    "future_price_diffs_buy": price_diffs_buy,
+                    "future_price_diffs_sell": price_diffs_sell,
+                }
+            )
+        #----------------------------------------------------------
+            # Get historic prices
+        if self.price_hour_lookback > 0:
+            hour_offsets = jnp.arange(self.price_hour_lookback) * timesteps_per_hour  # [0, 1, 2, ...] * steps_per_hour
+            past_timesteps = state.timestep - hour_offsets
+
+            # Clip so we don't index before the start of the episode
+            past_timesteps = jnp.clip(past_timesteps, 0, None)
+
+            past_prices = jax.vmap(
+                lambda t: self.get_grid_buy_price(state._replace(timestep=t))
+            )(past_timesteps)
+            past_sell_prices = jax.vmap(
+                lambda t: self.get_grid_sell_price(state._replace(timestep=t))
+            )(past_timesteps)
+
+            # Calculate price differences relative to now (index 0)
+            past_price_diffs_buy = past_prices[0] - past_prices[1:]
+            past_price_diffs_sell = past_sell_prices[0] - past_sell_prices[1:]
+
+            observations.update(
+                {
+                    "past_buy_prices": past_prices,
+                    "past_sell_prices": past_sell_prices,
+                    "past_price_diffs_buy": past_price_diffs_buy,
+                    "past_price_diffs_sell": past_price_diffs_sell,
+                }
+            )
+        #--------------------------------------------------------
 
         observations.update(
             {
-                "future_buy_prices": future_prices,
-                "future_sell_prices": future_sell_prices,
-                "future_price_diffs_buy": price_diffs_buy,
-                "future_price_diffs_sell": price_diffs_sell,
                 "current_timestep": state.timestep,
                 "current_day_of_year": state.day_of_year,
                 "is_workday": state.is_workday,
