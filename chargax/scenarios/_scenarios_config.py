@@ -72,7 +72,8 @@ SCENARIOS = {
             "num_discretization_levels": 10,
             "allow_discharging": False,
             "renormalize_currents": True,
-            "price_hour_lookahead": 24, #In original paper, they use 24 hours historic data
+            "price_hour_lookahead": 0, #In original paper, they use 24 hours historic data
+            "price_hour_lookback": 24,
             "capacity_exceeded_alpha": 0,
             "charged_satisfaction_alpha": 0,
             "battery_degradation_alpha": 0,

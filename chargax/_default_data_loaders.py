@@ -14,17 +14,25 @@ if TYPE_CHECKING:
 
 DATA_FOLDER = "data"
 
-
-def _average_data(data, length):
+def _resample_data(data, length):
     """
-    Average over data to a desired length
-    i.e. array([0, 5, 10]) -> array([0, 2.5, 2.5, 5, 5]) if length = 5
+    Resample data to a desired length
+    i.e. array([0, 5, 10]) -> array([0, 2.5, 2.5, 5, 5]) if length = 5 (upsampling)
+    i.e. array([0, 2.5, 2.5, 5, 5]) -> array([0, 5, 10]) if length = 3 (downsampling)
     """
     x = np.array(data)
     old_length = len(x)
-    x = np.repeat(x, length // x.shape[0]).reshape(old_length, -1)
-    x = x / x.shape[1]
-    x = x.flatten()
+
+    if length >= old_length:
+        # Upsample
+        x = np.repeat(x,  length // x.shape[0]).reshape(old_length, -1)
+        x = x / x.shape[1]
+        x = x.flatten()
+    else:
+        # Downsample
+        bin_size = old_length // length
+        x = x[: length * bin_size]  
+        x = x.reshape(length, bin_size).sum(axis=1)
     return np.array(x)
 
 
@@ -68,10 +76,10 @@ def _load_scenario_csvs(dataset: str, average_cars_per_day, minutes_per_timestep
     ]
     desired_length = 24 * 60 // minutes_per_timestep
     data[0] = (
-        _average_data(data[0], desired_length) / 100
+        _resample_data(data[0], desired_length) / 100
     ) * average_cars_per_day  # data is in percentages (0-100) --> make it absolute
     data[1] = (
-        _average_data(data[1], desired_length) / 100
+        _resample_data(data[1], desired_length) / 100
     ) * average_cars_per_day  # data is in percentages (0-100) --> make it absolute
     data[2] = data[2] * 60  # convert hours to minutes
     return tuple(data)
