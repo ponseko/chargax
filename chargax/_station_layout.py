@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
+from typing_extensions import Self
 
 
 class StationNode(eqx.Module):
@@ -35,12 +36,13 @@ class StationNode(eqx.Module):
         pass
 
 
-class PassiveNode(StationNode):
-    """An abstract source / sink. Provides or drains an uncontrollable amount of power from the system.
-    This can be a constant amount or variable (e.g. based on time of day).
+class _PassiveNode(StationNode):
+    """Shared base for abstract sources / sinks. Provides or drains an uncontrollable amount of
+    power from the system. This can be a constant amount or variable (e.g. based on time of day).
 
-    The power provided/drained by this node is not normalized by distribute() on a splitter.
-    I.e. it takes precedence over controllable loads and is always drawn / supplied.
+    Abstract base class. Use PassiveForcedNode or PassiveFlexNode to instantiate
+    a passive node, depending on whether the flow must always take
+    precedence or can be normalized alongside controllable loads by distribute().
     """
 
     load_profile: Callable[[Any], float] | float = 0.0
@@ -56,22 +58,65 @@ class PassiveNode(StationNode):
 
     @property
     def requested_power(self) -> float:
-        """Power drawn from the grid (charging the battery) in kW, always >= 0."""
+        """Power drawn from the grid in kW, always >= 0."""
         return jnp.maximum(0.0, self.throughput_now_kw)
 
     @property
     def supplied_power(self) -> float:
-        """Power supplied back to the grid (discharging the battery) in kW, always >= 0."""
+        """Power supplied back to the grid in kW, always >= 0."""
         return jnp.maximum(0.0, -self.throughput_now_kw)
+
+    @abstractmethod
+    def _feasible_net(self) -> float: ...
+
+    @abstractmethod
+    def distribute(self, available_from_top: float) -> Self: ...
+
+
+class PassiveForcedNode(_PassiveNode):
+    """An uncontrollable source / sink whose power is never normalized
+    (scaled) by distribute() on a splitter - it takes precedence over
+    controllable loads and is always drawn / supplied in full, even if that
+    exceeds the station's capacity.
+
+    Use this for must-serve loads (e.g. on-site shops that cannot have their
+    power dropped due to EVs chargings, or must-run generation that cannot be curbed).
+    """
 
     @property
     def _feasible_net(self) -> float:
-        """Net power (requested - supplied) this node presents upstream. Passive
-        loads are uncontrollable, so their raw net is always feasible."""
+        """Net power (requested - supplied) this node presents upstream. This
+        flow is uncontrollable and always feasible from the node's own point
+        of view; any shortfall shows up as exceeded capacity upstream instead."""
         return self.requested_power - self.supplied_power
 
     def distribute(self, available_from_top: float):
-        return self  # no distribution needed for PassiveNode
+        return self  # never scaled - always takes precedence
+
+
+class PassiveFlexNode(_PassiveNode):
+    """An uncontrollable source / sink whose power *can* be curtailed by
+    distribute() like any other controllable flow, when the station cannot
+    carry it in full. Unlike PassiveForcedNode, this node's flow
+    is scaled proportionally alongside EVSEs/batteries rather than reserved
+    off the top.
+
+    Use this for curtailable generation (e.g. PV that must be clipped when
+    the grid connection or an inverter rating can't absorb it) or
+    demand-response-capable loads.
+    """
+
+    @property
+    def _feasible_net(self) -> float:
+        """Net power this node can actually present upstream"""
+        net = self.requested_power - self.supplied_power
+        return jnp.clip(net, -self.max_kw_throughput, self.max_kw_throughput)
+
+    def distribute(self, available_from_top: float):
+        new_throughput = jnp.clip(
+            available_from_top, -self.max_kw_throughput, self.max_kw_throughput
+        )
+        return self.replace(throughput_now_kw=new_throughput)
 
 
 class StationBattery(StationNode):
@@ -284,7 +329,7 @@ class StationSplitter(StationNode):
     A splitter can contain:
     - EVSEs
     - Batteries
-    - PassiveNodes
+    - PassiveForcedNode / PassiveFlexNode instances
     - Other nodes
     """
 
@@ -327,22 +372,42 @@ class StationSplitter(StationNode):
         return jax.tree.map(lambda *t: jnp.concatenate(t), *batteries)
 
     @property
-    def passives(self) -> List["PassiveNode"]:
-        """Return a list of all passive nodes in this subtree."""
+    def passives(self) -> List["_PassiveNode"]:
+        """Return a list of all passive nodes (forced and flex) in this subtree."""
         return [
             passive
             for passive in jax.tree.leaves(
-                self.connections, is_leaf=lambda x: isinstance(x, PassiveNode)
+                self.connections, is_leaf=lambda x: isinstance(x, _PassiveNode)
             )
-            if isinstance(passive, PassiveNode)
+            if isinstance(passive, _PassiveNode)
         ]
 
     @property
-    def passives_flat(self) -> "PassiveNode":
-        """Return a single PassiveNode with all passive loads concatenated."""
-        if not self.passives:
-            return PassiveNode(load_profile=0.0)
-        passives = jax.tree.map(jnp.atleast_1d, self.passives)
+    def passives_flat(self) -> "_PassiveNode":
+        """Return a single passive node with all passive loads concatenated.
+
+        All passives in this subtree must be the same concrete type
+        (all ``PassiveForcedNode`` or all ``PassiveFlexNode``), since
+        concatenation requires matching pytree structure.
+
+        Raises:
+            ValueError: If the subtree contains a mix of passive node types.
+                Use :attr:`passives` instead and handle each node separately.
+        """
+        passives = self.passives
+        if not passives:
+            return PassiveForcedNode(load_profile=0.0)
+
+        passive_types = {type(p) for p in passives}
+        if len(passive_types) > 1:
+            type_names = ", ".join(sorted(t.__name__ for t in passive_types))
+            raise ValueError(
+                "passives_flat() cannot concatenate mixed passive node types "
+                f"({type_names}). Use the passives property instead and handle "
+                "each node separately."
+            )
+
+        passives = jax.tree.map(jnp.atleast_1d, passives)
         return jax.tree.map(lambda *t: jnp.concatenate(t), *passives)
 
     @property
@@ -423,14 +488,19 @@ class StationSplitter(StationNode):
             export_budget = jnp.maximum(0.0, -available_from_top)
 
         connections = self.connections
-        passive_mask = jnp.array([isinstance(c, PassiveNode) for c in connections])
+        # Only PassiveForcedNode is reserved off the top / never scaled.
+        # PassiveFlexNode flows through the same controllable pathway as
+        # EVSEs/batteries below, and can be curtailed like them.
+        passive_mask = jnp.array(
+            [isinstance(c, PassiveForcedNode) for c in connections]
+        )
         net_flows = jnp.array([c._feasible_net for c in connections])
 
         passive_requested = sum(
-            c.requested_power for c in connections if isinstance(c, PassiveNode)
+            c.requested_power for c in connections if isinstance(c, PassiveForcedNode)
         )
         passive_supplied = sum(
-            c.supplied_power for c in connections if isinstance(c, PassiveNode)
+            c.supplied_power for c in connections if isinstance(c, PassiveForcedNode)
         )
 
         available_power = jnp.minimum(available_from_top, self.max_kw_throughput)
@@ -487,7 +557,7 @@ class StationSplitter(StationNode):
         return jax.tree.map(
             lambda node: next(it) if isinstance(node, EVSE) else node,
             self,
-            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery, PassiveNode)),
+            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery, _PassiveNode)),
         )
 
     def update_evses_from_flat(self, flat_evse: EVSE) -> "StationSplitter":
@@ -516,7 +586,7 @@ class StationSplitter(StationNode):
         return jax.tree.map(
             lambda node: next(it) if isinstance(node, StationBattery) else node,
             self,
-            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery, PassiveNode)),
+            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery, _PassiveNode)),
         )
 
     def update_batteries_from_flat(
@@ -544,14 +614,14 @@ class StationSplitter(StationNode):
         return self.update_batteries_from_list(batteries)
 
     def update_passives_from_list(
-        self, passives: List["PassiveNode"]
+        self, passives: List["_PassiveNode"]
     ) -> "StationSplitter":
-        """Return a copy of this subtree with PassiveNodes replaced in order."""
+        """Return a copy of this subtree with passive nodes replaced in order."""
         it = iter(passives)
         return jax.tree.map(
-            lambda node: next(it) if isinstance(node, PassiveNode) else node,
+            lambda node: next(it) if isinstance(node, _PassiveNode) else node,
             self,
-            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery, PassiveNode)),
+            is_leaf=lambda x: isinstance(x, (EVSE, StationBattery, _PassiveNode)),
         )
 
 
@@ -563,7 +633,7 @@ class ChargingStation(StationSplitter):
 
         def _set_cumulative_efficiencies(node, parent_eff=1.0):
             eff = parent_eff * node.efficiency
-            if isinstance(node, (EVSE, StationBattery, PassiveNode)):
+            if isinstance(node, (EVSE, StationBattery, _PassiveNode)):
                 object.__setattr__(node, "cumulative_efficiency", eff)
                 return
             if isinstance(node, StationSplitter):

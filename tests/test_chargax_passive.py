@@ -1,21 +1,22 @@
-"""Integration tests for PassiveNode in the Chargax environment."""
+"""Integration tests for passive nodes in the Chargax environment."""
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import pytest
 
-from chargax._station_layout import ChargingStation, PassiveNode
+from chargax._station_layout import ChargingStation, PassiveFlexNode, PassiveForcedNode
 from chargax.chargax import Chargax, EnvState
 from tests.test_station_layout_distribute import _evse_with_kw
 
 
-def _station_with_passive(load_profile) -> ChargingStation:
+def _station_with_passive(load_profile, *, flex: bool = False) -> ChargingStation:
+    passive_cls = PassiveFlexNode if flex else PassiveForcedNode
     return ChargingStation(
         max_kw_throughput=500.0,
         efficiency=1.0,
         connections=[
-            PassiveNode(load_profile=load_profile),
+            passive_cls(load_profile=load_profile),
             _evse_with_kw([0.0], shared_max_kw=100.0),
         ],
     )
@@ -61,3 +62,16 @@ def test_reset_applies_passive_load():
     env = _env_for_station(station)
     _, state = env.reset_env(jax.random.PRNGKey(0))
     assert float(state.grid.passives[0].throughput_now_kw) == pytest.approx(25.0)
+
+
+def test_set_passive_throughputs_applies_to_flex_node_too():
+    station = _station_with_passive(-40.0, flex=True)
+    env = _env_for_station(station)
+    state = EnvState(
+        datetime=jdt.to_datetime("2024-06-01"),
+        grid=station,
+        elec_customer_sell_price=0.75,
+    )
+    state = env.set_passive_throughputs(state)
+    assert isinstance(state.grid.passives[0], PassiveFlexNode)
+    assert float(state.grid.passives[0].throughput_now_kw) == pytest.approx(-40.0)

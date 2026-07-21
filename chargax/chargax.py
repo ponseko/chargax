@@ -16,7 +16,7 @@ from ._default_data_loaders import (
     build_default_scenario,
     build_leave_cars_fn,
 )
-from ._station_layout import EVSE, ChargingStation, PassiveNode, StationBattery
+from ._station_layout import EVSE, ChargingStation, StationBattery, _PassiveNode
 
 
 class EnvState(jym.EnvState):
@@ -252,7 +252,7 @@ class Chargax(jym.Environment):
     def set_passive_throughputs(self, state: EnvState) -> EnvState:
         """Set uncontrollable passive loads from their load profiles (kW rate for this step)."""
 
-        def _passive_throughput(passive: PassiveNode) -> PassiveNode:
+        def _passive_throughput(passive: _PassiveNode) -> _PassiveNode:
             load_kw = passive.get_current_load(state)
             return passive.replace(
                 throughput_now_kw=jnp.asarray(load_kw, dtype=jnp.float32)
@@ -264,7 +264,7 @@ class Chargax(jym.Environment):
         new_passives = jax.tree.map(
             _passive_throughput,
             state.grid.passives,
-            is_leaf=lambda x: isinstance(x, PassiveNode),
+            is_leaf=lambda x: isinstance(x, _PassiveNode),
         )
         return state._replace(grid=state.grid.update_passives_from_list(new_passives))
 

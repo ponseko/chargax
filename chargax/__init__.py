@@ -1,7 +1,8 @@
 from ._station_layout import (
     EVSE as EVSE,
     ChargingStation as ChargingStation,
-    PassiveNode as PassiveNode,
+    PassiveFlexNode as PassiveFlexNode,
+    PassiveForcedNode as PassiveForcedNode,
     StationBattery as StationBattery,
     StationNode as StationNode,
     StationSplitter as StationSplitter,
