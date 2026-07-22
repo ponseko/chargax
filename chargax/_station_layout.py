@@ -43,7 +43,7 @@ class PassiveNode(StationNode):
     I.e. it takes precedence over controllable loads and is always drawn / supplied.
     """
 
-    load_profile: Callable[[Any], float] | float = 0.0
+    load_profile: Callable[[Any], float] | float = eqx.field(static=True, default=0.0)
     throughput_now_kw: float = 0.0  # positive for draining, negative for supplying
     max_kw_throughput: float = eqx.field(default=jnp.iinfo(jnp.int32).max)
     efficiency: float = 1.0
