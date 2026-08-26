@@ -9,8 +9,6 @@ from jaxtyping import Array, PRNGKeyArray
 from chargax import EVSE, Chargax, ChargingStation
 from chargax.baselines import MaxCharge, Random
 
-
-
 if __name__ == "__main__":
     rng = jax.random.PRNGKey(42)
 
@@ -33,8 +31,7 @@ if __name__ == "__main__":
         normalize_observations=True,  # Important
     )
 
-
-#  trial 
+    #  trial
 
     agent = agent.train(rng, env)
 
