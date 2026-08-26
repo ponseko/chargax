@@ -16,7 +16,7 @@ from ._default_data_loaders import (
     build_default_scenario,
     build_leave_cars_fn,
 )
-from ._station_layout import EVSE, ChargingStation, PassiveNode, StationBattery
+from ._station_layout import EVSE, ChargingStation, StationBattery, _PassiveNode
 
 
 class EnvState(jym.EnvState):
@@ -119,6 +119,9 @@ class Chargax(jym.Environment):
     minutes_per_timestep: int = 5
     """Duration of each simulation timestep in minutes."""
 
+    simulation_length_days: int = 1
+    """Number of days to simulate per episode. The environment will terminate after this many days."""
+
     renormalize_currents: bool = True
     """Whether to redistribute currents across chargers to respect shared capacity constraints."""
 
@@ -136,7 +139,11 @@ class Chargax(jym.Environment):
 
     @property
     def max_episode_steps(self) -> int:
-        return int(24 * 60 / self.minutes_per_timestep)  # Simulate one day
+        return int(24 * 60 // self.minutes_per_timestep) * self.simulation_length_days
+
+    @property
+    def includes_battery(self) -> bool:
+        return bool(self.station.batteries)
 
     def __post_init__(self):
         if self.get_num_cars_arriving is None or self.get_new_cars_arriving is None:
@@ -250,9 +257,8 @@ class Chargax(jym.Environment):
 
     def set_passive_throughputs(self, state: EnvState) -> EnvState:
         """Set uncontrollable passive loads from their load profiles (kW rate for this step)."""
-        
-        # Is this the base load? 
-        def _passive_throughput(passive: PassiveNode) -> PassiveNode:
+
+        def _passive_throughput(passive: _PassiveNode) -> _PassiveNode:
             load_kw = passive.get_current_load(state)
             return passive.replace(
                 throughput_now_kw=jnp.asarray(load_kw, dtype=jnp.float32)
@@ -264,7 +270,7 @@ class Chargax(jym.Environment):
         new_passives = jax.tree.map(
             _passive_throughput,
             state.grid.passives,
-            is_leaf=lambda x: isinstance(x, PassiveNode),
+            is_leaf=lambda x: isinstance(x, _PassiveNode),
         )
         return state._replace(grid=state.grid.update_passives_from_list(new_passives))
 

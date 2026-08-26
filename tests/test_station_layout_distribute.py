@@ -6,7 +6,8 @@ import pytest
 from chargax._station_layout import (
     EVSE,
     ChargingStation,
-    PassiveNode,
+    PassiveFlexNode,
+    PassiveForcedNode,
     StationBattery,
     StationSplitter,
 )
@@ -31,9 +32,21 @@ def _evse_with_kw(
     )
 
 
-def _passive(throughput_kw: float) -> PassiveNode:
-    """Positive = uncontrollable load, negative = uncontrollable generation."""
-    return PassiveNode(load_profile=0.0).replace(throughput_now_kw=throughput_kw)
+def _passive(throughput_kw: float) -> PassiveForcedNode:
+    """A forced passive: always takes precedence, never scaled by distribute().
+    Positive = uncontrollable load, negative = uncontrollable generation."""
+    return PassiveForcedNode(load_profile=0.0).replace(throughput_now_kw=throughput_kw)
+
+
+def _passive_flex(
+    throughput_kw: float, *, max_kw: float | None = None
+) -> PassiveFlexNode:
+    """A flex passive: curtailed like a controllable flow when the station
+    can't carry it in full. Positive = load, negative = generation."""
+    node = PassiveFlexNode(load_profile=0.0).replace(throughput_now_kw=throughput_kw)
+    if max_kw is not None:
+        node = node.replace(max_kw_throughput=max_kw)
+    return node
 
 
 def _battery(throughput_kw: float, *, max_kw: float = 500.0) -> StationBattery:
@@ -222,7 +235,7 @@ class TestEVSEExportCap:
         assert float(out.supplied_power) == pytest.approx(200.0)
 
 
-class TestPassiveNode:
+class TestPassiveForcedNode:
     def test_passive_load_reduces_controllable_budget(self):
         passive = _passive(80.0)
         evse = _evse_with_kw([200.0], shared_max_kw=500.0)
@@ -254,6 +267,27 @@ class TestPassiveNode:
         assert float(split.connections[0].throughput_now_kw) == pytest.approx(50.0)
         assert float(split.connections[1].requested_power) == pytest.approx(200.0)
         assert float(split.connections[2].throughput_now_kw) == pytest.approx(-250.0)
+
+
+class TestPassivesFlat:
+    def test_homogeneous_forced_passives_concatenate(self):
+        tree = _grid(_passive(10.0), _passive(20.0), max_kw=500.0)
+        flat = tree.passives_flat
+        assert float(flat.throughput_now_kw[0]) == pytest.approx(10.0)
+        assert float(flat.throughput_now_kw[1]) == pytest.approx(20.0)
+
+    def test_homogeneous_flex_passives_concatenate(self):
+        tree = _grid(_passive_flex(10.0), _passive_flex(20.0), max_kw=500.0)
+        flat = tree.passives_flat
+        assert float(flat.throughput_now_kw[0]) == pytest.approx(10.0)
+        assert float(flat.throughput_now_kw[1]) == pytest.approx(20.0)
+
+    def test_mixed_passive_types_raise_with_helpful_message(self):
+        tree = _grid(_passive(10.0), _passive_flex(-20.0), max_kw=500.0)
+        with pytest.raises(ValueError, match="passives_flat\\(\\) cannot concatenate"):
+            tree.passives_flat
+        with pytest.raises(ValueError, match="Use the passives property instead"):
+            tree.passives_flat
 
 
 class TestGridSurplusAccounting:
@@ -538,6 +572,270 @@ class TestDeliveredPowerWithDischargeSupport:
         evse_out = tree.distribute().connections[0].connections[0]
 
         assert _kw(evse_out) == pytest.approx([300.0, -100.0], abs=1e-2)
+
+
+class TestPassiveForcedLoadsWithinCapacity:
+    def test_single_passive_draw_with_evse(self):
+        passive = _passive(80.0)
+        evse = _evse_with_kw([100.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(passive, evse, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_single_passive_generation_with_evse(self):
+        passive = _passive(-90.0)
+        evse = _evse_with_kw([150.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(passive, evse, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_passive_with_evse_and_battery(self):
+        passive = _passive(50.0)
+        evse = _evse_with_kw([300.0], shared_max_kw=500.0)
+        battery = _battery(-400.0)
+        tree = _grid(_splitter(passive, evse, battery, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_multiple_passives_within_capacity(self):
+        # A draw and a generation passive that partially offset each other.
+        p_draw = _passive(90.0)
+        p_gen = _passive(-30.0)
+        evse = _evse_with_kw([120.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(p_draw, p_gen, evse, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_passive_nested_in_multiple_levels(self):
+        passive_outer = _passive(20.0)
+        passive_inner = _passive(30.0)
+        fast = _evse_with_kw(
+            [200.0], voltage=600.0, max_current=500.0, shared_max_kw=600.0
+        )
+        battery = _battery(-100.0, max_kw=500.0)
+        inner = _splitter(passive_inner, fast, battery, max_kw=150.0)
+        tree = _grid(_splitter(passive_outer, inner, max_kw=300.0), max_kw=1000.0)
+        result = tree.distribute()
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_grid_connection_itself_bounded_by_passive_and_controllable(self):
+        # The grid connection (not just the inner splitter) is the binding limit.
+        passive = _passive(60.0)
+        evse = _evse_with_kw([300.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(passive, evse, max_kw=1000.0), max_kw=150.0)
+        result = tree.distribute()
+        assert _throughput(result.connections[0].connections[0]) == pytest.approx(
+            60.0, abs=1e-2
+        )
+        assert _requested(result.connections[0].connections[1]) == pytest.approx(
+            90.0, abs=1e-2
+        )
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_default_station_with_added_passive_load_runs_clean(self):
+        # A realistic multi-level station (fast/slow chargers + battery) that
+        # additionally carries a passive load (e.g. site facilities) well within
+        # the branch's rating.
+        passive = _passive(30.0)
+        fast = _evse_with_kw(
+            [200.0], voltage=600.0, max_current=500.0, shared_max_kw=600.0
+        )
+        slow = _evse_with_kw(
+            [40.0], voltage=230.0, max_current=50.0, shared_max_kw=50.0
+        )
+        battery = _battery(-50.0, max_kw=500.0)
+        tree = _grid(
+            _splitter(passive, fast, slow, battery, max_kw=650.0), max_kw=200.0
+        )
+        result = tree.distribute()
+        _assert_no_exceeded(result, tol=1e-3)
+
+
+class TestPassiveForcedLoadsExceedStationCapacity:
+    def test_passive_draw_alone_exceeds_splitter(self):
+        passive = _passive(300.0)
+        tree = _grid(_splitter(passive, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        # The passive is never throttled...
+        assert _throughput(split.connections[0]) == pytest.approx(300.0)
+        # ...so the shortfall at the splitter is exactly the physical overage.
+        net = float(split.requested_power - split.supplied_power)
+        assert net == pytest.approx(300.0)
+        assert float(split.exceeded_power_all_children) == pytest.approx(
+            100.0, abs=1e-3
+        )
+
+    def test_passive_generation_alone_exceeds_splitter(self):
+        passive = _passive(-300.0)
+        tree = _grid(_splitter(passive, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(-300.0)
+        net = float(split.requested_power - split.supplied_power)
+        assert net == pytest.approx(-300.0)
+        assert float(split.exceeded_power_all_children) == pytest.approx(
+            100.0, abs=1e-3
+        )
+
+    def test_passive_draw_exceeds_splitter_zeros_controllable_sibling(self):
+        passive = _passive(300.0)
+        evse = _evse_with_kw([100.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(passive, evse, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        # Sibling demand cannot be served at all; it is driven to (approx) zero,
+        # not left partially served or pushed negative.
+        assert _requested(split.connections[1]) == pytest.approx(0.0, abs=1e-3)
+        assert jnp.all(split.connections[1].charger_current_now >= -1e-6)
+        # Exceedance equals exactly the passive overage; the EVSE being zeroed
+        # does not add any further exceedance.
+        assert float(split.exceeded_power_all_children) == pytest.approx(
+            100.0, abs=1e-3
+        )
+
+    def test_passive_generation_exceeds_splitter_with_battery_unable_to_help(self):
+        # Battery only wants to charge 50 kW; distribute() may scale that down
+        # but never invents extra demand to soak up the passive surplus.
+        passive = _passive(-300.0)
+        battery = _battery(50.0)
+        tree = _grid(_splitter(passive, battery, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(-300.0)
+        assert _throughput(split.connections[1]) == pytest.approx(50.0, abs=1e-2)
+        net = float(split.requested_power - split.supplied_power)
+        assert net == pytest.approx(-250.0, abs=1e-2)
+        assert float(split.exceeded_power_all_children) == pytest.approx(50.0, abs=1e-3)
+
+    def test_multiple_passives_combined_exceed_splitter(self):
+        # Individually each passive fits (120 < 200) but together they don't.
+        p1 = _passive(120.0)
+        p2 = _passive(120.0)
+        evse = _evse_with_kw([50.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(p1, p2, evse, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(120.0)
+        assert _throughput(split.connections[1]) == pytest.approx(120.0)
+        assert _requested(split.connections[2]) == pytest.approx(0.0, abs=1e-3)
+        assert float(split.exceeded_power_all_children) == pytest.approx(40.0, abs=1e-3)
+
+    def test_passive_load_exceeds_distant_grid_connection(self):
+        # The passive load sits deep in the tree; every splitter above it has
+        # ample capacity, but the top-level grid connection cannot carry it.
+        passive = _passive(400.0)
+        inner = _splitter(passive, max_kw=1000.0)
+        tree = _grid(_splitter(inner, max_kw=1000.0), max_kw=150.0)
+        result = tree.distribute()
+
+        assert _throughput(
+            result.connections[0].connections[0].connections[0]
+        ) == pytest.approx(400.0)
+        grid_net = float(result.requested_power - result.supplied_power)
+        assert grid_net == pytest.approx(400.0)
+        assert float(result.exceeded_power_all_children) == pytest.approx(
+            250.0, abs=1e-3
+        )
+
+    def test_passive_load_exceeds_grid_connection_directly(self):
+        passive = _passive(500.0)
+        tree = _grid(passive, max_kw=200.0)
+        result = tree.distribute()
+
+        assert _throughput(result.connections[0]) == pytest.approx(500.0)
+        assert float(result.exceeded_power_all_children) == pytest.approx(
+            300.0, abs=1e-3
+        )
+
+
+class TestPassiveFlexNodeCurtailment:
+    def test_flex_generation_alone_curtailed_to_splitter_export_cap(self):
+        flex = _passive_flex(-300.0)
+        tree = _grid(_splitter(flex, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(-200.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_flex_draw_alone_curtailed_to_splitter_import_cap(self):
+        flex = _passive_flex(300.0)
+        tree = _grid(_splitter(flex, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(200.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_forced_draw_takes_precedence_over_flex_generation(self):
+        # The shop (forced) always gets served in full; the PV (flex) is
+        # curtailed to whatever export capacity remains.
+        shop = _passive(50.0)
+        pv = _passive_flex(-300.0)
+        tree = _grid(_splitter(shop, pv, max_kw=200.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(50.0, abs=1e-2)
+        assert _throughput(split.connections[1]) == pytest.approx(-200.0, abs=1e-2)
+        net = float(split.requested_power - split.supplied_power)
+        assert net == pytest.approx(-150.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_flex_generation_shares_export_cap_proportionally_with_battery(self):
+        # Flex PV and battery discharge each want 200 kW export through a
+        # 200 kW splitter -> both scaled down to 100 kW (0.5 each).
+        flex = _passive_flex(-200.0)
+        battery = _battery(-200.0, max_kw=500.0)
+        tree = _grid(_splitter(flex, battery, max_kw=200.0), max_kw=1_000_000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(-100.0, abs=1e-2)
+        assert _throughput(split.connections[1]) == pytest.approx(-100.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_flex_draw_shares_import_cap_proportionally_with_evse(self):
+        flex = _passive_flex(300.0)
+        evse = _evse_with_kw([100.0], shared_max_kw=500.0)
+        tree = _grid(_splitter(flex, evse, max_kw=200.0), max_kw=1_000_000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(150.0, abs=1e-2)
+        assert _requested(split.connections[1]) == pytest.approx(50.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_flex_own_rating_binds_even_with_ample_splitter_capacity(self):
+        # An inverter/curtailment rating of 100 kW on the flex node itself
+        # limits it, even though the splitter above has plenty of headroom.
+        flex = _passive_flex(-300.0, max_kw=100.0)
+        tree = _grid(_splitter(flex, max_kw=1000.0), max_kw=1000.0)
+        result = tree.distribute()
+        split = result.connections[0]
+
+        assert _throughput(split.connections[0]) == pytest.approx(-100.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
+
+    def test_flex_generation_exceeds_distant_grid_connection(self):
+        # Even deep in the tree, a flex node is curtailed to respect a
+        # constrained ancestor (the grid connection), not just its immediate
+        # splitter.
+        flex = _passive_flex(-400.0)
+        inner = _splitter(flex, max_kw=1000.0)
+        tree = _grid(_splitter(inner, max_kw=1000.0), max_kw=150.0)
+        result = tree.distribute()
+
+        assert _throughput(
+            result.connections[0].connections[0].connections[0]
+        ) == pytest.approx(-150.0, abs=1e-2)
+        _assert_no_exceeded(result, tol=1e-3)
 
 
 class TestDeliveredPowerNested:
