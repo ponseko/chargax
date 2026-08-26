@@ -285,9 +285,9 @@ class TestPassivesFlat:
     def test_mixed_passive_types_raise_with_helpful_message(self):
         tree = _grid(_passive(10.0), _passive_flex(-20.0), max_kw=500.0)
         with pytest.raises(ValueError, match="passives_flat\\(\\) cannot concatenate"):
-            tree.passives_flat
+            _ = tree.passives_flat
         with pytest.raises(ValueError, match="Use the passives property instead"):
-            tree.passives_flat
+            _ = tree.passives_flat
 
 
 class TestGridSurplusAccounting:

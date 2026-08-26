@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 from importlib import resources as r
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Literal
 
 import jax
 import jax.numpy as jnp

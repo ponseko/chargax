@@ -10,6 +10,7 @@ from jaxtyping import Array, Bool, PRNGKeyArray
 from chargax import Chargax, EnvState
 from chargax._station_layout import StationBattery
 
+
 class ChargaxBaselineAgent(eqx.Module):
     def __init__(self, env: Chargax):
         self.env = env
@@ -163,8 +164,7 @@ class FixedRateCharge(ChargaxBaselineAgent):
         self.battery_schedule = battery_schedule
 
     def _fixed_evse_action_level(self) -> int:
-        """Compute the discretized action level corresponding to charge_rate.
-        """
+        """Compute the discretized action level corresponding to charge_rate."""
         num_levels = self.env.num_discretization_levels
         if self.env.allow_discharging:
             idle_level = num_levels
@@ -201,10 +201,10 @@ class FixedRateCharge(ChargaxBaselineAgent):
                 lambda x: jnp.full_like(x, IDLE), action["batteries"]
             )
             return action, None
-        
+
     def _run_episode(self, key: PRNGKeyArray, **kwargs) -> tuple[Array, Array]:
         def _scan_step_fn(carry, _):
-            seed, state, obs, schedule = carry
+            seed, state, obs, _schedule = carry
             this_step_key, next_key = jax.random.split(seed)
 
             env_state = getattr(state, "env_state", state)
@@ -227,7 +227,7 @@ class FixedRateCharge(ChargaxBaselineAgent):
             None,
             length=self.env.max_episode_steps,
         )
-        return rewards, profits        
+        return rewards, profits
 
 
 class MaxCharge(FixedRateCharge):
@@ -241,6 +241,7 @@ class MaxCharge(FixedRateCharge):
     ):
         super().__init__(env, charge_rate=1.0, battery_schedule=battery_schedule)
 
+
 class Random(ChargaxBaselineAgent):
     """A rule-based baseline that selects a random charge level."""
 
@@ -249,5 +250,3 @@ class Random(ChargaxBaselineAgent):
 
     def get_action(self, key: PRNGKeyArray, **kwargs) -> float:
         return self.env.sample_action(key)
-    
-

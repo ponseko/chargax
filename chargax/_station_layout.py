@@ -1,13 +1,13 @@
 from abc import abstractmethod
+from collections.abc import Callable
 from dataclasses import fields
-from typing import Any, Callable, List
+from typing import Any, Self
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
-from typing_extensions import Self
 
 
 class StationNode(eqx.Module):
@@ -22,18 +22,15 @@ class StationNode(eqx.Module):
     @abstractmethod
     def requested_power(self) -> float:
         """Returns the total power requested by this node/subtree in kW"""
-        pass
 
     @property
     @abstractmethod
     def supplied_power(self) -> float:
         """Returns the total power supplied to the grid by this node/subtree in kW"""
-        pass
 
     @abstractmethod
     def distribute(self, available_from_top: float):
         """Distribute the available power to the node/subtree"""
-        pass
 
 
 class _PassiveNode(StationNode):
@@ -333,10 +330,10 @@ class StationSplitter(StationNode):
     - Other nodes
     """
 
-    connections: List[StationNode]
+    connections: list[StationNode]
 
     @property
-    def evses(self) -> List[EVSE]:
+    def evses(self) -> list[EVSE]:
         """Return a list of all EVSEs in this subtree."""
         return [
             evse
@@ -353,7 +350,7 @@ class StationSplitter(StationNode):
         return jax.tree.map(lambda *t: jnp.concatenate(t), *evses)
 
     @property
-    def batteries(self) -> List["StationBattery"]:
+    def batteries(self) -> list["StationBattery"]:
         """Return a list of all batteries in this subtree."""
         return [
             battery
@@ -372,7 +369,7 @@ class StationSplitter(StationNode):
         return jax.tree.map(lambda *t: jnp.concatenate(t), *batteries)
 
     @property
-    def passives(self) -> List["_PassiveNode"]:
+    def passives(self) -> list["_PassiveNode"]:
         """Return a list of all passive nodes (forced and flex) in this subtree."""
         return [
             passive
@@ -416,7 +413,7 @@ class StationSplitter(StationNode):
         return sum(evse.num_chargers for evse in self.evses)
 
     @property
-    def _all_descendant_nodes(self) -> List[StationNode]:
+    def _all_descendant_nodes(self) -> list[StationNode]:
         """Recursively collect all StationNodes below this node (children, grandchildren, etc.)."""
         result = []
         for c in self.connections:
@@ -551,7 +548,7 @@ class StationSplitter(StationNode):
             connections=[c.distribute(net) for c, net in zip(connections, scaled)]
         )
 
-    def update_evses_from_list(self, evses: List["EVSE"]) -> "StationSplitter":
+    def update_evses_from_list(self, evses: list["EVSE"]) -> "StationSplitter":
         """Return a copy of this subtree with EVSEs replaced in order."""
         it = iter(evses)
         return jax.tree.map(
@@ -579,7 +576,7 @@ class StationSplitter(StationNode):
         return self.update_evses_from_list(evses)
 
     def update_batteries_from_list(
-        self, batteries: List["StationBattery"]
+        self, batteries: list["StationBattery"]
     ) -> "StationSplitter":
         """Return a copy of this subtree with Batteries replaced in order."""
         it = iter(batteries)
@@ -614,7 +611,7 @@ class StationSplitter(StationNode):
         return self.update_batteries_from_list(batteries)
 
     def update_passives_from_list(
-        self, passives: List["_PassiveNode"]
+        self, passives: list["_PassiveNode"]
     ) -> "StationSplitter":
         """Return a copy of this subtree with passive nodes replaced in order."""
         it = iter(passives)
