@@ -31,8 +31,6 @@ if __name__ == "__main__":
         normalize_observations=True,  # Important
     )
 
-    #  trial
-
     agent = agent.train(rng, env)
 
     results = agent.evaluate(rng, env, num_eval_episodes=25)
