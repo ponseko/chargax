@@ -49,9 +49,11 @@ class ChargaxBaselineAgent(eqx.Module):
             r, p = self._run_episode(k)
             rewards.append(r)
             profits.append(p)
+
         # Average over the episodes
         avg_reward = np.stack(rewards)
         avg_profit = np.stack(profits)
+
         return avg_reward, avg_profit
 
     @abstractmethod
@@ -117,19 +119,34 @@ class SimpleBatterySchedule(eqx.Module):
         return action, new_self
 
 
-class MaxCharge(ChargaxBaselineAgent):
-    """A rule-based baseline that always selects the maximum charge level
-    for EVSEs and uses a schedule for station batteries."""
+class FixedRateCharge(ChargaxBaselineAgent):
+    """A rule-based baselinethat always selects a fixed, configurable charge
+    rate for EVSEs (always positive / charging, never discharging, regardless
+    of whether the environment allows discharging) and uses a schedule for
+    station batteries."""
 
     env: Chargax
+    charge_rate: float
     battery_schedule: SimpleBatterySchedule | None
 
     def __init__(
         self,
         env: Chargax,
+        charge_rate: float = 0.5,
         battery_schedule: Literal["simple", "none"] = "simple",
     ):
+        """
+        charge_rate: fraction in [0, 1] of the maximum *charging* rate to apply
+            at every EVSE, every timestep. 0.0 = idle, 1.0 = max charge.
+            Always resolves to a non-negative (charging) action level, even if
+            env.allow_discharging is True.
+        """
+        if not (0.0 <= charge_rate <= 1.0):
+            raise ValueError(f"charge_rate must be in [0, 1], got {charge_rate}")
+
         self.env = env
+        self.charge_rate = charge_rate
+
         if battery_schedule == "simple":
             is_charging_init = jax.tree.map(
                 lambda _: False,
@@ -146,17 +163,28 @@ class MaxCharge(ChargaxBaselineAgent):
             raise ValueError(f"Invalid battery_schedule: {battery_schedule}")
         self.battery_schedule = battery_schedule
 
+    def _fixed_evse_action_level(self) -> int:
+        """Compute the discretized action level corresponding to charge_rate."""
+        num_levels = self.env.num_discretization_levels
+        if self.env.allow_discharging:
+            idle_level = num_levels
+            max_level = num_levels * 2
+        else:
+            idle_level = 0
+            max_level = num_levels
+
+        level = idle_level + jnp.round(self.charge_rate * (max_level - idle_level))
+        return jnp.clip(level, idle_level, max_level).astype(jnp.int32)
+
     def get_action(
         self, key: PRNGKeyArray, **kwargs
     ) -> tuple[dict, SimpleBatterySchedule | None]:
         action = self.env.sample_action(key)
 
-        MAX_ACTION_EVSES = self.env.num_discretization_levels
-        if self.env.allow_discharging:
-            MAX_ACTION_EVSES *= 2
+        FIXED_ACTION_EVSES = self._fixed_evse_action_level()
 
         action["evses"] = jax.tree.map(
-            lambda x: jnp.full_like(x, MAX_ACTION_EVSES), action["evses"]
+            lambda x: jnp.full_like(x, FIXED_ACTION_EVSES), action["evses"]
         )
 
         if self.battery_schedule is not None:
@@ -176,7 +204,7 @@ class MaxCharge(ChargaxBaselineAgent):
 
     def _run_episode(self, key: PRNGKeyArray, **kwargs) -> tuple[Array, Array]:
         def _scan_step_fn(carry, _):
-            seed, state, obs, schedule = carry
+            seed, state, obs, _schedule = carry
             this_step_key, next_key = jax.random.split(seed)
 
             env_state = getattr(state, "env_state", state)
@@ -200,6 +228,18 @@ class MaxCharge(ChargaxBaselineAgent):
             length=self.env.max_episode_steps,
         )
         return rewards, profits
+
+
+class MaxCharge(FixedRateCharge):
+    """A rule-based baseline based on FixedRateCharge that always selects the maximum charge
+    rate for EVSEs."""
+
+    def __init__(
+        self,
+        env: Chargax,
+        battery_schedule: Literal["simple", "none"] = "simple",
+    ):
+        super().__init__(env, charge_rate=1.0, battery_schedule=battery_schedule)
 
 
 class Random(ChargaxBaselineAgent):

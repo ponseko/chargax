@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 from importlib import resources as r
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Literal
 
 import jax
 import jax.numpy as jnp
@@ -14,17 +15,25 @@ if TYPE_CHECKING:
 
 DATA_FOLDER = "data"
 
-
-def _average_data(data, length):
+def _resample_data(data, length):
     """
-    Average over data to a desired length
-    i.e. array([0, 5, 10]) -> array([0, 2.5, 2.5, 5, 5]) if length = 5
+    Resample data to a desired length
+    i.e. array([0, 5, 10]) -> array([0, 2.5, 2.5, 5, 5]) if length = 5 (upsampling)
+    i.e. array([0, 2.5, 2.5, 5, 5]) -> array([0, 5, 10]) if length = 3 (downsampling)
     """
     x = np.array(data)
     old_length = len(x)
-    x = np.repeat(x, length // x.shape[0]).reshape(old_length, -1)
-    x = x / x.shape[1]
-    x = x.flatten()
+
+    if length >= old_length:
+        # Upsample
+        x = np.repeat(x,  length // x.shape[0]).reshape(old_length, -1)
+        x = x / x.shape[1]
+        x = x.flatten()
+    else:
+        # Downsample
+        bin_size = old_length // length
+        x = x[: length * bin_size]  
+        x = x.reshape(length, bin_size).sum(axis=1)
     return np.array(x)
 
 
@@ -68,10 +77,10 @@ def _load_scenario_csvs(dataset: str, average_cars_per_day, minutes_per_timestep
     ]
     desired_length = 24 * 60 // minutes_per_timestep
     data[0] = (
-        _average_data(data[0], desired_length) / 100
+        _resample_data(data[0], desired_length) / 100
     ) * average_cars_per_day  # data is in percentages (0-100) --> make it absolute
     data[1] = (
-        _average_data(data[1], desired_length) / 100
+        _resample_data(data[1], desired_length) / 100
     ) * average_cars_per_day  # data is in percentages (0-100) --> make it absolute
     data[2] = data[2] * 60  # convert hours to minutes
     return tuple(data)
@@ -111,7 +120,7 @@ def build_default_scenario(
     user_profile: Literal[
         "highway", "residential", "workplace", "shopping"
     ] = "highway",
-    average_cars_per_day: int | Literal["low", "medium", "high"] = "medium",
+    average_cars_per_day: int | Literal["home", "low", "medium", "high"] = "medium",
     seed: int = 0,
 ) -> tuple[
     Callable[[PRNGKeyArray, EnvState], int], Callable[[PRNGKeyArray, EnvState], EVSE]
@@ -121,13 +130,16 @@ def build_default_scenario(
     Returns:
         A tuple of (get_num_cars_arriving, get_new_cars_arriving) callables.
     """
-    if average_cars_per_day in ["low", "medium", "high"]:
-        if average_cars_per_day == "low":
+    if average_cars_per_day in ["home", "low", "medium", "high"]:
+        if average_cars_per_day == "home":
+            average_cars_per_day = 1
+        elif average_cars_per_day == "low":
             average_cars_per_day = 50
         elif average_cars_per_day == "medium":
             average_cars_per_day = 100
         elif average_cars_per_day == "high":
             average_cars_per_day = 250
+        
 
     arrival_data_workdays, arrival_data_weekends, connection_times, energy_demands = (
         _load_scenario_csvs(

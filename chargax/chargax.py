@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Tuple
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -90,6 +90,9 @@ class Chargax(jym.Environment):
     get_grid_sell_price: Callable[[EnvState], float] = None
     """Callable that returns the grid electricity sell price in €/kWh for the current state."""
 
+    minimize_costs: bool = False
+    """Instead of trying to maximize profit by making the price between grid and consumer as large as possible, it tries to minimize this gap when turned to True."""
+
     # reward alpha values
     capacity_exceeded_alpha: float = 0.0
     """Reward penalty weight for exceeding the station's grid capacity limit."""
@@ -128,7 +131,10 @@ class Chargax(jym.Environment):
     price_hour_lookahead: int = 6
     """Number of future hours of electricity prices included in the observation."""
 
-    default_data_kwargs: Dict = eqx.field(static=True, default_factory=lambda: {})
+    price_hour_lookback: int = 0
+    """Number of past hours of electricity prices included in the observation."""
+
+    default_data_kwargs: dict = eqx.field(static=True, default_factory=dict)
     """Keyword arguments passed to default data loaders for car/price scenario configuration."""
 
     @property
@@ -178,7 +184,7 @@ class Chargax(jym.Environment):
                     ),
                 )
 
-    def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
+    def reset_env(self, key: PRNGKeyArray) -> tuple[dict[str, Array], EnvState]:
 
         random_day_of_year = jax.random.randint(key, (), 0, 365)
         year = self.simulation_starting_year
@@ -195,8 +201,8 @@ class Chargax(jym.Environment):
         return observation, state
 
     def step_env(
-        self, rng: PRNGKeyArray, old_state: EnvState, actions: Dict[str, Array]
-    ) -> Tuple[TimeStep, EnvState]:
+        self, rng: PRNGKeyArray, old_state: EnvState, actions: dict[str, Array]
+    ) -> tuple[TimeStep, EnvState]:
         key1, key2 = jax.random.split(rng)
         new_state = old_state
 
@@ -351,7 +357,9 @@ class Chargax(jym.Environment):
             - charging_ports.car_discharged_this_session_kw,
             0.0,
         ).sum()
+
         revenue = energy_sold * state.elec_customer_sell_price
+
         discharged_this_session = (
             charging_ports.car_discharged_this_session_kw + -real_charged_this_timestep
         ).clip(0)
@@ -492,25 +500,68 @@ class Chargax(jym.Environment):
 
         # Get future prices
         timesteps_per_hour = 60 // self.minutes_per_timestep
-        hour_offsets = jnp.arange(self.price_hour_lookahead) * timesteps_per_hour
-        future_timesteps = state.timestep + hour_offsets
-        future_prices = jax.vmap(
-            lambda t: self.get_grid_buy_price(state._replace(timestep=t))
-        )(future_timesteps)
-        future_sell_prices = jax.vmap(
-            lambda t: self.get_grid_sell_price(state._replace(timestep=t))
-        )(future_timesteps)
+        
+        if self.price_hour_lookahead > 0:
+            hour_offsets = jnp.arange(self.price_hour_lookahead) * timesteps_per_hour
+            future_timesteps = state.timestep + hour_offsets
+            future_prices = jax.vmap(
+                lambda t: self.get_grid_buy_price(state._replace(timestep=t))
+            )(future_timesteps)
+            future_sell_prices = jax.vmap(
+                lambda t: self.get_grid_sell_price(state._replace(timestep=t))
+            )(future_timesteps)
 
-        # Calculate price differences for all lookahead periods
-        price_diffs_buy = future_prices[1:] - future_prices[0]  # all diffs from now
-        price_diffs_sell = future_sell_prices[1:] - future_sell_prices[0]  # ""
+            # Calculate price differences for all lookahead periods
+            if self.price_hour_lookahead == 1:
+                price_diffs_buy = future_prices[0] # No future to compare to only looks at current timestep
+                price_diffs_sell = future_sell_prices[0]  
+            else:
+                price_diffs_buy = future_prices[1:] - future_prices[0]  # all diffs from now
+                price_diffs_sell = future_sell_prices[1:] - future_sell_prices[0]  # ""
+
+            observations.update(
+                {
+                    "future_buy_prices": future_prices,
+                    "future_sell_prices": future_sell_prices,
+                    "future_price_diffs_buy": price_diffs_buy,
+                    "future_price_diffs_sell": price_diffs_sell,
+                }
+            )
+        
+        # Get historic prices
+        if self.price_hour_lookback > 0:
+            hour_offsets = jnp.arange(self.price_hour_lookback) * timesteps_per_hour  # [0, 1, 2, ...] * steps_per_hour
+            past_timesteps = state.timestep - hour_offsets
+
+            # Clip so we don't index before the start of the episode
+            past_timesteps = jnp.clip(past_timesteps, 0, None)
+
+            past_prices = jax.vmap(
+                lambda t: self.get_grid_buy_price(state._replace(timestep=t))
+            )(past_timesteps)
+            past_sell_prices = jax.vmap(
+                lambda t: self.get_grid_sell_price(state._replace(timestep=t))
+            )(past_timesteps)
+
+            # Calculate price differences relative to now (index 0)
+            if self.price_hour_lookback == 1:
+                past_price_diffs_buy = past_prices[0] # No past to compare to only looks at current timestep
+                past_price_diffs_sell = past_sell_prices[0]
+            else:
+                past_price_diffs_buy = past_prices[0] - past_prices[1:]
+                past_price_diffs_sell = past_sell_prices[0] - past_sell_prices[1:]
+
+            observations.update(
+                {
+                    "past_buy_prices": past_prices,
+                    "past_sell_prices": past_sell_prices,
+                    "past_price_diffs_buy": past_price_diffs_buy,
+                    "past_price_diffs_sell": past_price_diffs_sell,
+                }
+            )
 
         observations.update(
             {
-                "future_buy_prices": future_prices,
-                "future_sell_prices": future_sell_prices,
-                "future_price_diffs_buy": price_diffs_buy,
-                "future_price_diffs_sell": price_diffs_sell,
                 "current_timestep": state.timestep,
                 "current_day_of_year": state.day_of_year,
                 "is_workday": state.is_workday,
@@ -521,6 +572,14 @@ class Chargax(jym.Environment):
 
     def get_reward(self, old_state: EnvState, new_state: EnvState) -> Array:
         profit_delta = new_state.profit - old_state.profit
+
+        # If the objective is to minimize costs the profits will get reduced. 
+        # In other words the gap between the grid price and static costumer price need to be as small as possible 
+        objective_delta = jnp.where(self.minimize_costs, -profit_delta, profit_delta)
+        if self.minimize_costs:
+            objective_delta = -profit_delta  #cost minimization
+        else:
+            objective_delta = profit_delta  #profit maximization
 
         # uncharged_delta = new_state.uncharged_percentages - old_state.uncharged_percentages
         uncharged_delta = new_state.uncharged_kw - old_state.uncharged_kw
@@ -538,7 +597,7 @@ class Chargax(jym.Environment):
             new_state.total_discharged_kw - old_state.total_discharged_kw
         )  # use discharged kw as proxy for degredation
 
-        return profit_delta - (
+        return objective_delta - (
             self.charged_satisfaction_alpha * uncharged_delta
             + self.time_satisfaction_alpha
             * (charged_overtime_delta - (self.beta * charged_undertime_delta))
@@ -555,7 +614,7 @@ class Chargax(jym.Environment):
 
     def get_info(
         self, state: EnvState, actions, old_state: EnvState = None
-    ) -> Dict[str, Array]:
+    ) -> dict[str, Array]:
         return {
             "profit": state.profit,
             "exceeded_capacity": state.exceeded_capacity,

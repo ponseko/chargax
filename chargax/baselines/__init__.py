@@ -1,1 +1,5 @@
-from ._rulebased import MaxCharge as MaxCharge, Random as Random
+from ._rulebased import (
+    FixedRateCharge as FixedRateCharge,
+    MaxCharge as MaxCharge,
+    Random as Random,
+)
