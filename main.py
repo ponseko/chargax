@@ -21,17 +21,17 @@ if __name__ == "__main__":
 
     # RL Training with PPO
     total_timesteps = 500_000
-    agent = PPO(  # Not optimized, just a simple example
+    trainer = PPO(  # Not optimized, just a simple example
         num_steps=300,
         num_envs=8,
         total_timesteps=total_timesteps,
-        learning_rate=2.5e-4,
-        anneal_learning_rate=True,
+        learning_rate_start=2.5e-4,
+        learning_rate_end=0.0,  # Linearly anneal to 0
         normalize_rewards=False,
         normalize_observations=True,  # Important
     )
 
-    agent = agent.train(rng, env)
+    agent, metrics = trainer.train(rng, env)
 
     results = agent.evaluate(rng, env, num_eval_episodes=25)
     print(f"PPO - Average reward over 25 evaluation episodes: {np.mean(results)}")
