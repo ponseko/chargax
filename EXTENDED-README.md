@@ -299,8 +299,8 @@ env = Chargax(station=charging_station)
 env = jym.LogWrapper(env) # Add LogWrapper!
 
 # RL Training with PPO
-agent = PPO(log_function="simple", log_interval=0.05)
-agent = agent.train(rng, env)
+trainer = PPO(log_function="simple", log_interval=0.05)
+agent, metrics = trainer.train(rng, env)
 
 ```
 
@@ -317,8 +317,8 @@ def my_custom_logging_function(
     np.save(processed_data, ...)
 
 log_interval = 1 # Log EVERY training iteration (after every rollout)
-agent = PPO(log_function=my_custom_logging_function, log_interval=log_interval)
-agent = agent.train(rng, env)
+trainer = PPO(log_function=my_custom_logging_function, log_interval=log_interval)
+agent, metrics = trainer.train(rng, env)
 
 ```
 
