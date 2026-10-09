@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Tuple
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -128,7 +128,7 @@ class Chargax(jym.Environment):
     price_hour_lookahead: int = 6
     """Number of future hours of electricity prices included in the observation."""
 
-    default_data_kwargs: Dict = eqx.field(static=True, default_factory=lambda: {})
+    default_data_kwargs: dict = eqx.field(static=True, default_factory=dict)
     """Keyword arguments passed to default data loaders for car/price scenario configuration."""
 
     @property
@@ -178,7 +178,7 @@ class Chargax(jym.Environment):
                     ),
                 )
 
-    def reset_env(self, key: PRNGKeyArray) -> Tuple[Dict[str, Array], EnvState]:
+    def reset_env(self, key: PRNGKeyArray) -> tuple[dict[str, Array], EnvState]:
 
         random_day_of_year = jax.random.randint(key, (), 0, 365)
         year = self.simulation_starting_year
@@ -195,8 +195,8 @@ class Chargax(jym.Environment):
         return observation, state
 
     def step_env(
-        self, rng: PRNGKeyArray, old_state: EnvState, actions: Dict[str, Array]
-    ) -> Tuple[TimeStep, EnvState]:
+        self, rng: PRNGKeyArray, old_state: EnvState, actions: dict[str, Array]
+    ) -> tuple[TimeStep, EnvState]:
         key1, key2 = jax.random.split(rng)
         new_state = old_state
 
@@ -555,7 +555,7 @@ class Chargax(jym.Environment):
 
     def get_info(
         self, state: EnvState, actions, old_state: EnvState = None
-    ) -> Dict[str, Array]:
+    ) -> dict[str, Array]:
         return {
             "profit": state.profit,
             "exceeded_capacity": state.exceeded_capacity,

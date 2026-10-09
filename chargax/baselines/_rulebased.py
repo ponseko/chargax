@@ -176,7 +176,7 @@ class MaxCharge(ChargaxBaselineAgent):
 
     def _run_episode(self, key: PRNGKeyArray, **kwargs) -> tuple[Array, Array]:
         def _scan_step_fn(carry, _):
-            seed, state, obs, schedule = carry
+            seed, state, obs, _schedule = carry
             this_step_key, next_key = jax.random.split(seed)
 
             env_state = getattr(state, "env_state", state)
