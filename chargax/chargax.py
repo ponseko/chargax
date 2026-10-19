@@ -573,10 +573,15 @@ class Chargax(jym.Environment):
 
     @property
     def observation_space(self):
-        obs, _ = self.reset_env(jax.random.PRNGKey(0))
-        return jax.tree.map(
-            lambda v: jym.Box(-jnp.inf, jnp.inf, getattr(v, "shape", ())), obs
-        )
+        BOUND = 1_000_000
+        obs, _ = jax.eval_shape(self.reset_env, jax.random.PRNGKey(0))
+
+        def leaf_space(leaf):
+            if jnp.issubdtype(leaf.dtype, jnp.bool_):
+                return jym.Box(False, True, leaf.shape, dtype=leaf.dtype)
+            return jym.Box(-BOUND, BOUND, leaf.shape, dtype=leaf.dtype)
+
+        return jax.tree.map(leaf_space, obs)
 
     @property
     def action_space(self) -> jym.Space:
