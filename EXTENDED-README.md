@@ -166,7 +166,7 @@ For full control, replace any of the data-generating functions directly. Each ca
 ```python
 def my_buy_price(state):
     """Time-of-use pricing: expensive during the day, cheap at night."""
-    hour = (state.timestep * env.minutes_per_timestep) / 60.0
+    hour = state.minute_of_day / 60.0
     return jnp.where((hour >= 8) & (hour < 20), 0.30, 0.10)
 
 def my_sell_price(state):
@@ -198,14 +198,16 @@ You can similarly override `get_new_cars_arriving` (generates EVSE entries for n
 
 The following parameters can be passed to `Chargax(...)` to configure simulation behaviour:
 
-| Parameter                   | Default | Description                                                                                                                                                                                                  |
-| --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `minutes_per_timestep`      | `5`     | Duration of each simulation timestep in minutes. One episode always simulates a single day (24 h), so this also determines the number of steps per episode ($24 \times 60 / \text{minutes\_per\_timestep}$). |
-| `num_discretization_levels` | `10`    | Number of discrete action levels per charger. E.g. 10 yields actions at 10 %, 20 %, …, 100 % of the maximum rate.                                                                                            |
-| `allow_discharging`         | `True`  | Whether vehicle-to-grid (V2G) discharging is permitted. When enabled, the action space doubles (negative current levels are added).                                                                          |
-| `renormalize_currents`      | `True`  | Whether to redistribute currents across chargers after each step so that shared capacity constraints (e.g. grid connection limit) are respected.                                                             |
-| `price_hour_lookahead`      | `6`     | Number of future hours of electricity prices included in the observation.                                                                                                                                    |
-| `elec_customer_sell_price`  | `0.75`  | Price in €/kWh charged to customers for electricity delivered.                                                                                                                                               |
+| Parameter                   | Default | Description                                                                                                                                                                                                                       |
+| --------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `minutes_per_timestep`      | `5`     | Duration of each simulation timestep in minutes. Together with `simulation_length_days`, this determines the number of steps per episode ($24 \times 60 / \text{minutes\_per\_timestep} \times \text{simulation\_length\_days}$). |
+| `simulation_length_days`    | `1`     | Number of days simulated per episode.                                                                                                                                                                                             |
+| `simulation_starting_year`  | `2023`  | Calendar year from which the starting day of each episode is sampled (uniformly, including December 31st in leap years). Matches the year of the default grid price dataset (`2023_NL`).                                          |
+| `num_discretization_levels` | `10`    | Number of discrete action levels per charger. E.g. 10 yields actions at 10 %, 20 %, …, 100 % of the maximum rate.                                                                                                                 |
+| `allow_discharging`         | `True`  | Whether vehicle-to-grid (V2G) discharging is permitted. When enabled, the action space doubles (negative current levels are added).                                                                                               |
+| `renormalize_currents`      | `True`  | Whether to redistribute currents across chargers after each step so that shared capacity constraints (e.g. grid connection limit) are respected.                                                                                  |
+| `price_hour_lookahead`      | `6`     | Number of future hours of electricity prices included in the observation.                                                                                                                                                         |
+| `elec_customer_sell_price`  | `0.75`  | Price in €/kWh charged to customers for electricity delivered.                                                                                                                                                                    |
 
 ```python
 env = Chargax(
@@ -262,8 +264,9 @@ The observation returned by `env.reset_env(key)` and each `env.step_env(...)` is
 | `future_sell_prices`      | `(price_hour_lookahead,)`     | Grid sell prices (€/kWh) for the current and next hours.                                                                              |
 | `future_price_diffs_buy`  | `(price_hour_lookahead - 1,)` | Difference between each future buy price and the current buy price.                                                                   |
 | `future_price_diffs_sell` | `(price_hour_lookahead - 1,)` | Difference between each future sell price and the current sell price.                                                                 |
-| `current_timestep`        | `int`                         | Current timestep index within the day.                                                                                                |
-| `current_day_of_year`     | `int`                         | Day of the year (0–364).                                                                                                              |
+| `current_timestep`        | `int`                         | Timestep index within the episode.                                                                                                    |
+| `current_minute_of_day`   | `int`                         | Minutes since midnight (0–1439) of the current time.                                                                                  |
+| `current_day_of_year`     | `int`                         | Day of the year (1–366).                                                                                                              |
 | `is_workday`              | `bool`                        | Whether the current day is a weekday (Mon–Fri).                                                                                       |
 
 The EVSE pytree exposes per-charger arrays with fields such as `car_battery_now_kw`, `car_battery_capacity_kw`, `car_time_till_leave`, `car_desired_battery_percentage`, `charger_current_now`, `charger_is_car_connected`, and others. See the `EVSE` class for the full list.
