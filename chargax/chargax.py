@@ -77,8 +77,8 @@ class Chargax(jym.Environment[TState]):
     station: ChargingStation
     """The charging station layout defining EVSEs, batteries, and power limits."""
 
-    simulation_starting_year: int = 2024
-    """Calander year for the simulation. Default reset() will randomly sample a day within this year and set
+    simulation_starting_year: int = 2023
+    """Calendar year for the simulation. Default reset() will randomly sample a day within this year and set
     the datetime accordingly in the state. This may then be used to query time-dependent data."""
 
     elec_customer_sell_price: float = 0.75  # €/kWh
@@ -190,8 +190,9 @@ class Chargax(jym.Environment[TState]):
 
     def reset_env(self, key: PRNGKeyArray) -> tuple[dict, TState]:
 
-        random_day_of_year = jax.random.randint(key, (), 0, 365)
         year = self.simulation_starting_year
+        days_in_year = 366 if calendar.isleap(int(year)) else 365
+        random_day_of_year = jax.random.randint(key, (), 0, days_in_year)
         random_day = jdt.to_datetime(f"{int(year)}-01-01") + jdt.Timedelta(
             days=random_day_of_year
         )
@@ -529,6 +530,7 @@ class Chargax(jym.Environment[TState]):
                 "future_price_diffs_buy": price_diffs_buy,
                 "future_price_diffs_sell": price_diffs_sell,
                 "current_timestep": state.timestep,
+                "current_minute_of_day": state.minute_of_day,
                 "current_day_of_year": state.day_of_year,
                 "is_workday": state.is_workday,
             }
