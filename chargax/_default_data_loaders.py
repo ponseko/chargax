@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from collections.abc import Callable
 from importlib import resources as r
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import jax
 import jax.numpy as jnp
@@ -107,7 +107,7 @@ def _load_car_profiles(dataset: Literal["eu", "us", "world"]):
 
 
 def build_default_scenario(
-    env: Chargax,
+    env: Chargax[Any],
     car_profile: Literal["eu", "us", "world"] = "eu",
     user_profile: Literal[
         "highway", "residential", "workplace", "shopping"
@@ -228,7 +228,7 @@ def build_default_scenario(
 
 
 def build_default_grid_price_fn(
-    env: Chargax, dataset: str = "2023_NL", offset: float = 0
+    env: Chargax[Any], dataset: str = "2023_NL", offset: float = 0
 ) -> Callable[[EnvState], float]:
     """Default function to get the electricity prices based on the dataset"""
 

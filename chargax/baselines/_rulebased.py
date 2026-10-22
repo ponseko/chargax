@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Literal
+from typing import Any, Literal
 
 import equinox as eqx
 import jax
@@ -12,7 +12,7 @@ from chargax._station_layout import StationBattery
 
 
 class ChargaxBaselineAgent(eqx.Module):
-    def __init__(self, env: Chargax):
+    def __init__(self, env: Chargax[Any]):
         self.env = env
 
     def _run_episode(self, key: PRNGKeyArray, **kwargs) -> tuple[Array, Array]:
@@ -121,12 +121,12 @@ class MaxCharge(ChargaxBaselineAgent):
     """A rule-based baseline that always selects the maximum charge level
     for EVSEs and uses a schedule for station batteries."""
 
-    env: Chargax
+    env: Chargax[Any]
     battery_schedule: SimpleBatterySchedule | None
 
     def __init__(
         self,
-        env: Chargax,
+        env: Chargax[Any],
         battery_schedule: Literal["simple", "none"] = "simple",
     ):
         self.env = env
@@ -205,7 +205,7 @@ class MaxCharge(ChargaxBaselineAgent):
 class Random(ChargaxBaselineAgent):
     """A rule-based baseline that selects a random charge level."""
 
-    env: Chargax
+    env: Chargax[Any]
     state: None = None  # Placeholder for compatibility
 
     def get_action(self, key: PRNGKeyArray, **kwargs) -> float:

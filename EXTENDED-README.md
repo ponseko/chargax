@@ -24,7 +24,6 @@ python main.py
 
 For CUDA support, additionally run `pip install jax[cuda]`.
 
-
 ## 🏗️ Customizing the Station Layout
 
 The main function uses a default charging station initialized as follows:
@@ -32,36 +31,37 @@ The main function uses a default charging station initialized as follows:
 ```python
 	import jax
 	from chargax import Chargax, ChargingStation
-	
+
 	station = ChargingStation.init_default_station()
 	env = Chargax(station=station)
-	
+
 	key = jax.random.PRNGKey(0)
 	obs, state = env.reset_env(key)
 ```
 
 The station layout can easily be changed. The station is a tree of nodes. You compose it from the following building blocks:
 
-| Node | Purpose |
-|---|---|
-| `StationSplitter` | Switchboards, cables, transformers — anything that splits or limits power |
-| `EVSE` | A group of physical charger connectors |
-| `StationBattery` | On-site battery storage |
+| Node              | Purpose                                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `StationSplitter` | Switchboards, cables, transformers — anything that splits or limits power                                                           |
+| `EVSE`            | A group of physical charger connectors                                                                                              |
+| `StationBattery`  | On-site battery storage                                                                                                             |
 | `ChargingStation` | Convenience class for the top node of the tree. Essentially just a `StationSplitter` with a constructor and a custom init function. |
 
 These elements require the following properties on initialization:
 
-| Property | Explanation |
-|---|---|
-| `max_kw_throughput` | The maximum power in kW that can flow through this node. If Chargax is simulated with `renormalize_currents=True` (default), all nodes are normalized to this level at each step. |
-| `efficiency` | Multiplier for the actual power that is effectively flowing through this node. |
-| `connections` (StationSplitter) | A list of other nodes that are children of this node |
-| `num_chargers` (EVSE) | Number of cars that can be connected to this EVSE simultaneously. If multiple cars are connected, they have to share the `max_kw_throughput` |
-| `voltage` (EVSE) | Voltage of this EVSE (assumed fixed). Multiplied with `max_current` to calculate `max_kw_throughput` |
-| `max_current` (EVSE) | Maximum current that can be set by an agent on each charger of this EVSE. Multiplied with `voltage` to calculate `max_kw_throughput` |
-| `capacity_kw` (StationBattery) | Maximum capacity that can be stored in this on-site battery. |
+| Property                        | Explanation                                                                                                                                                                       |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_kw_throughput`             | The maximum power in kW that can flow through this node. If Chargax is simulated with `renormalize_currents=True` (default), all nodes are normalized to this level at each step. |
+| `efficiency`                    | Multiplier for the actual power that is effectively flowing through this node.                                                                                                    |
+| `connections` (StationSplitter) | A list of other nodes that are children of this node                                                                                                                              |
+| `num_chargers` (EVSE)           | Number of cars that can be connected to this EVSE simultaneously. If multiple cars are connected, they have to share the `max_kw_throughput`                                      |
+| `voltage` (EVSE)                | Voltage of this EVSE (assumed fixed). Multiplied with `max_current` to calculate `max_kw_throughput`                                                                              |
+| `max_current` (EVSE)            | Maximum current that can be set by an agent on each charger of this EVSE. Multiplied with `voltage` to calculate `max_kw_throughput`                                              |
+| `capacity_kw` (StationBattery)  | Maximum capacity that can be stored in this on-site battery.                                                                                                                      |
 
 As an example, note the following station layout with 4 EVSEs (2 fast, 2 slow, each with 2 connectors), and a battery on-site. The tree can be nested arbitrarily deep — any `StationSplitter` can contain other splitters, EVSEs, or batteries.
+
 - **`ChargingStation`** (Grid limit: 500 kW)
   - **`StationSplitter`** (Fast Hub: 300 kW)
     - **`EVSE`** (2 DC Chargers: ~150 kW)
@@ -111,7 +111,6 @@ env = Chargax(station=station)
 ```
 
 Likewise, we can construct a large 32 EVSE charging station:
-
 
 ```python
 from chargax import ChargingStation, StationSplitter, EVSE, StationBattery
@@ -199,14 +198,14 @@ You can similarly override `get_new_cars_arriving` (generates EVSE entries for n
 
 The following parameters can be passed to `Chargax(...)` to configure simulation behaviour:
 
-| Parameter | Default | Description |
-|---|---|---|
-| `minutes_per_timestep` | `5` | Duration of each simulation timestep in minutes. One episode always simulates a single day (24 h), so this also determines the number of steps per episode ($24 \times 60 / \text{minutes\_per\_timestep}$). |
-| `num_discretization_levels` | `10` | Number of discrete action levels per charger. E.g. 10 yields actions at 10 %, 20 %, …, 100 % of the maximum rate. |
-| `allow_discharging` | `True` | Whether vehicle-to-grid (V2G) discharging is permitted. When enabled, the action space doubles (negative current levels are added). |
-| `renormalize_currents` | `True` | Whether to redistribute currents across chargers after each step so that shared capacity constraints (e.g. grid connection limit) are respected. |
-| `price_hour_lookahead` | `6` | Number of future hours of electricity prices included in the observation. |
-| `elec_customer_sell_price` | `0.75` | Price in €/kWh charged to customers for electricity delivered. |
+| Parameter                   | Default | Description                                                                                                                                                                                                  |
+| --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `minutes_per_timestep`      | `5`     | Duration of each simulation timestep in minutes. One episode always simulates a single day (24 h), so this also determines the number of steps per episode ($24 \times 60 / \text{minutes\_per\_timestep}$). |
+| `num_discretization_levels` | `10`    | Number of discrete action levels per charger. E.g. 10 yields actions at 10 %, 20 %, …, 100 % of the maximum rate.                                                                                            |
+| `allow_discharging`         | `True`  | Whether vehicle-to-grid (V2G) discharging is permitted. When enabled, the action space doubles (negative current levels are added).                                                                          |
+| `renormalize_currents`      | `True`  | Whether to redistribute currents across chargers after each step so that shared capacity constraints (e.g. grid connection limit) are respected.                                                             |
+| `price_hour_lookahead`      | `6`     | Number of future hours of electricity prices included in the observation.                                                                                                                                    |
+| `elec_customer_sell_price`  | `0.75`  | Price in €/kWh charged to customers for electricity delivered.                                                                                                                                               |
 
 ```python
 env = Chargax(
@@ -228,14 +227,14 @@ $$r_t = \Delta\text{profit} - \left( \alpha_\text{cap} \cdot \Delta\text{exceede
 
 Where each $\Delta$ is the per-step change. Profit is the revenue from selling electricity to customers minus the grid electricity cost. The penalty terms allow you to shape the reward towards different objectives:
 
-| Parameter | Default | Penalises |
-|---|---|---|
-| `capacity_exceeded_alpha` | `0.0` | Exceeding the station's grid capacity limit (kW) |
-| `charged_satisfaction_alpha` | `0.0` | Unmet customer charging demand (uncharged kWh at departure) |
-| `time_satisfaction_alpha` | `0.0` | Overtime (car stays too long) and undertime (car leaves early), weighted by `beta` |
-| `rejected_customers_alpha` | `0.0` | Customers rejected because no charger was available |
-| `battery_degradation_alpha` | `0.0` | Battery degradation, proxied by total discharged kWh |
-| `beta` | `0.0` | Discount factor for undertime within the time satisfaction penalty |
+| Parameter                    | Default | Penalises                                                                          |
+| ---------------------------- | ------- | ---------------------------------------------------------------------------------- |
+| `capacity_exceeded_alpha`    | `0.0`   | Exceeding the station's grid capacity limit (kW)                                   |
+| `charged_satisfaction_alpha` | `0.0`   | Unmet customer charging demand (uncharged kWh at departure)                        |
+| `time_satisfaction_alpha`    | `0.0`   | Overtime (car stays too long) and undertime (car leaves early), weighted by `beta` |
+| `rejected_customers_alpha`   | `0.0`   | Customers rejected because no charger was available                                |
+| `battery_degradation_alpha`  | `0.0`   | Battery degradation, proxied by total discharged kWh                               |
+| `beta`                       | `0.0`   | Discount factor for undertime within the time satisfaction penalty                 |
 
 All alpha weights default to `0.0`, meaning the reward is purely profit-based unless you opt into additional penalty terms:
 
@@ -255,17 +254,17 @@ env = Chargax(
 
 The observation returned by `env.reset_env(key)` and each `env.step_env(...)` is a dictionary with the following keys:
 
-| Key | Shape / Type | Description |
-|---|---|---|
-| `evses` | `EVSE` pytree | Full state of every EVSE, including per-charger arrays for battery level, capacity, time till leave, current, connection status, etc. |
-| `batteries` | `StationBattery` pytree | Full state of every on-site battery (current level, throughput, capacity). |
-| `future_buy_prices` | `(price_hour_lookahead,)` | Grid buy prices (€/kWh) for the current and next hours. |
-| `future_sell_prices` | `(price_hour_lookahead,)` | Grid sell prices (€/kWh) for the current and next hours. |
-| `future_price_diffs_buy` | `(price_hour_lookahead - 1,)` | Difference between each future buy price and the current buy price. |
-| `future_price_diffs_sell` | `(price_hour_lookahead - 1,)` | Difference between each future sell price and the current sell price. |
-| `current_timestep` | `int` | Current timestep index within the day. |
-| `current_day_of_year` | `int` | Day of the year (0–364). |
-| `is_workday` | `bool` | Whether the current day is a weekday (Mon–Fri). |
+| Key                       | Shape / Type                  | Description                                                                                                                           |
+| ------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `evses`                   | `EVSE` pytree                 | Full state of every EVSE, including per-charger arrays for battery level, capacity, time till leave, current, connection status, etc. |
+| `batteries`               | `StationBattery` pytree       | Full state of every on-site battery (current level, throughput, capacity).                                                            |
+| `future_buy_prices`       | `(price_hour_lookahead,)`     | Grid buy prices (€/kWh) for the current and next hours.                                                                               |
+| `future_sell_prices`      | `(price_hour_lookahead,)`     | Grid sell prices (€/kWh) for the current and next hours.                                                                              |
+| `future_price_diffs_buy`  | `(price_hour_lookahead - 1,)` | Difference between each future buy price and the current buy price.                                                                   |
+| `future_price_diffs_sell` | `(price_hour_lookahead - 1,)` | Difference between each future sell price and the current sell price.                                                                 |
+| `current_timestep`        | `int`                         | Current timestep index within the day.                                                                                                |
+| `current_day_of_year`     | `int`                         | Day of the year (0–364).                                                                                                              |
+| `is_workday`              | `bool`                        | Whether the current day is a weekday (Mon–Fri).                                                                                       |
 
 The EVSE pytree exposes per-charger arrays with fields such as `car_battery_now_kw`, `car_battery_capacity_kw`, `car_time_till_leave`, `car_desired_battery_percentage`, `charger_current_now`, `charger_is_car_connected`, and others. See the `EVSE` class for the full list.
 
@@ -332,4 +331,39 @@ class Charging_w_AlteredInfo(Chargax):
         return {
             # ... state variables, actions, or state variables from the previous state
         }
+```
+
+## 🧩 Extending the Environment State
+
+To track additional variables, it is optionally possible to subclass `EnvState` and bind it as the type parameter of `Chargax`. The environment then constructs your state class on reset (via `self.state_type`), and all of Chargax's internal updates keep it intact.
+
+```python
+from chargax import Chargax, EnvState
+
+class MyState(EnvState):
+    steps_counted: int = 0  # new fields need a default
+
+class MyChargax(Chargax[MyState]): # <--- add here !
+    def step_env(self, rng, old_state, actions):
+        timestep, new_state = super().step_env(rng, old_state, actions)
+        new_state = new_state._replace(steps_counted=old_state.steps_counted + 1)
+        return timestep, new_state
+
+env = MyChargax(station=station)
+```
+
+New fields need a default value, as the base `reset_env` only sets the fields of the base `EnvState`. Alternatively, override `reset_env` to initialise them.
+
+To allow your own (subclassed) environment to be extended in the same way, keep it generic with a `TypeVar` that defaults to your state:
+
+```python
+from typing_extensions import TypeVar
+
+TMyState = TypeVar("TMyState", bound=MyState, default=MyState)
+
+class MyChargax(Chargax[TMyState]):
+    ...
+
+class MyFurtherChargax(MyChargax[MyFurtherState]):  # MyFurtherState subclasses MyState
+    ...
 ```

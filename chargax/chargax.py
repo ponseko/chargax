@@ -7,7 +7,8 @@ import jax_datetime as jdt
 import jaxnasium as jym
 import numpy as np
 from jaxnasium import TimeStep
-from jaxtyping import Array, Float, PRNGKeyArray
+from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from typing_extensions import TypeVar
 
 from chargax._util import year_and_doy
 
@@ -63,7 +64,10 @@ class EnvState(jym.EnvState):
     total_discharged_kw: float = 0.0
 
 
-class Chargax(jym.Environment):
+TState = TypeVar("TState", bound=EnvState, default=EnvState)
+
+
+class Chargax(jym.Environment[TState]):
     station: ChargingStation
     """The charging station layout defining EVSEs, batteries, and power limits."""
 
@@ -178,14 +182,14 @@ class Chargax(jym.Environment):
                     ),
                 )
 
-    def reset_env(self, key: PRNGKeyArray) -> tuple[dict[str, Array], EnvState]:
+    def reset_env(self, key: PRNGKeyArray) -> tuple[dict, TState]:
 
         random_day_of_year = jax.random.randint(key, (), 0, 365)
         year = self.simulation_starting_year
         random_day = jdt.to_datetime(f"{int(year)}-01-01") + jdt.Timedelta(
             days=random_day_of_year
         )
-        state = EnvState(
+        state = self.state_type(
             datetime=random_day,
             grid=self.station,
             elec_customer_sell_price=self.elec_customer_sell_price,
@@ -194,9 +198,9 @@ class Chargax(jym.Environment):
         observation = self.get_observation(state)
         return observation, state
 
-    def step_env(
-        self, rng: PRNGKeyArray, old_state: EnvState, actions: dict[str, Array]
-    ) -> tuple[TimeStep, EnvState]:
+    def step_env(  # type: ignore[reportIncompatibleMethodOverride]
+        self, rng: PRNGKeyArray, old_state: TState, actions: dict[str, Array]
+    ) -> tuple[TimeStep, TState]:
         key1, key2 = jax.random.split(rng)
         new_state = old_state
 
@@ -249,7 +253,7 @@ class Chargax(jym.Environment):
 
         return timestep_object, new_state
 
-    def set_passive_throughputs(self, state: EnvState) -> EnvState:
+    def set_passive_throughputs(self, state: TState) -> TState:
         """Set uncontrollable passive loads from their load profiles (kW rate for this step)."""
 
         def _passive_throughput(passive: _PassiveNode) -> _PassiveNode:
@@ -268,7 +272,7 @@ class Chargax(jym.Environment):
         )
         return state._replace(grid=state.grid.update_passives_from_list(new_passives))
 
-    def set_charging_currents(self, state: EnvState, actions: Array) -> EnvState:
+    def set_charging_currents(self, state: TState, actions: dict) -> TState:
         """Set new currents and power levels based on actions"""
         state = self.set_passive_throughputs(state)
 
@@ -322,8 +326,8 @@ class Chargax(jym.Environment):
         )
 
     def charge_cars_and_update_batteries(
-        self, state: EnvState, charging_ports: EVSE, batteries: StationBattery
-    ) -> tuple[EnvState, EVSE]:
+        self, state: TState, charging_ports: EVSE, batteries: StationBattery
+    ) -> tuple[TState, EVSE, StationBattery]:
 
         # (dis)charge cars:
         charging_now = self.kw_to_kw_this_timestep(charging_ports.power_output)
@@ -336,7 +340,7 @@ class Chargax(jym.Environment):
 
         # (dis)charge station batteries:
         batteries_throughput_now_kw = self.kw_to_kw_this_timestep(
-            batteries.throughput_now_kw
+            batteries.throughput_now_kw  # type: ignore[reportArgumentType]
         )
         new_station_battery_level = jnp.clip(
             batteries.battery_now + batteries_throughput_now_kw,
@@ -393,8 +397,8 @@ class Chargax(jym.Environment):
         )
 
     def update_time_and_clear_cars(
-        self, key: PRNGKeyArray, state: EnvState, ports: EVSE
-    ) -> tuple[EnvState, EVSE]:
+        self, key: PRNGKeyArray, state: TState, ports: EVSE
+    ) -> tuple[TState, EVSE]:
         new_time_till_leave = ports.car_time_till_leave - self.minutes_per_timestep
         new_time_waited = ports.car_time_waited + self.minutes_per_timestep
 
@@ -417,8 +421,8 @@ class Chargax(jym.Environment):
         return state, ports
 
     def set_customer_satisfaction_values(
-        self, state: EnvState, ports: EVSE, cars_leaving: Array
-    ) -> EnvState:
+        self, state: TState, ports: EVSE, cars_leaving: Array
+    ) -> TState:
         uncharged_percentages = (
             cars_leaving * jnp.maximum(ports.car_battery_desired_remaining, 0)
         ).sum()
@@ -443,8 +447,8 @@ class Chargax(jym.Environment):
         )
 
     def add_new_cars(
-        self, key: PRNGKeyArray, state: EnvState, ports: EVSE
-    ) -> tuple[EnvState, EVSE]:
+        self, key: PRNGKeyArray, state: TState, ports: EVSE
+    ) -> tuple[TState, EVSE]:
         key1, key2 = jax.random.split(key)
 
         new_cars_amount = self.get_num_cars_arriving(key1, state)
@@ -482,7 +486,7 @@ class Chargax(jym.Environment):
 
         return state, merged_chargers
 
-    def get_observation(self, state: EnvState) -> Array:
+    def get_observation(self, state: TState) -> dict:
 
         observations = {
             "evses": state.grid.evses,
@@ -519,7 +523,7 @@ class Chargax(jym.Environment):
 
         return observations
 
-    def get_reward(self, old_state: EnvState, new_state: EnvState) -> Array:
+    def get_reward(self, old_state: TState, new_state: TState) -> float:
         profit_delta = new_state.profit - old_state.profit
 
         # uncharged_delta = new_state.uncharged_percentages - old_state.uncharged_percentages
@@ -547,15 +551,13 @@ class Chargax(jym.Environment):
             + self.battery_degradation_alpha * battery_degredation_delta
         )
 
-    def get_terminated(self, state: EnvState) -> bool:
+    def get_terminated(self, state: TState) -> bool:
         return False
 
-    def get_truncated(self, state: EnvState) -> bool:
+    def get_truncated(self, state: TState) -> bool:
         return state.timestep >= self.max_episode_steps
 
-    def get_info(
-        self, state: EnvState, actions, old_state: EnvState = None
-    ) -> dict[str, Array]:
+    def get_info(self, state: TState, actions, old_state: TState | None = None) -> dict:
         return {
             "profit": state.profit,
             "exceeded_capacity": state.exceeded_capacity,
@@ -584,7 +586,7 @@ class Chargax(jym.Environment):
         return jax.tree.map(leaf_space, obs)
 
     @property
-    def action_space(self) -> jym.Space:
+    def action_space(self) -> jym.Space | PyTree[jym.Space]:
         """
         Define the action space of the environment.
         """
