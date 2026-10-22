@@ -1,3 +1,4 @@
+import calendar
 from collections.abc import Callable
 
 import equinox as eqx
@@ -10,7 +11,7 @@ from jaxnasium import TimeStep
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree
 from typing_extensions import TypeVar
 
-from chargax._util import year_and_doy
+from chargax._util import minute_of_day, weekday, year_and_doy
 
 from ._default_data_loaders import (
     build_default_grid_price_fn,
@@ -40,8 +41,13 @@ class EnvState(jym.EnvState):
 
     @property
     def day_of_week(self):
-        """0-6 for Monday-Sunday. 1970-01-01 was a Thursday (3), which is our reference."""
-        return (self.day_of_year + 3) % 7
+        """0-6 for Monday-Sunday."""
+        return weekday(self.datetime)
+
+    @property
+    def minute_of_day(self):
+        """Minutes since midnight (0-1439) of the current datetime."""
+        return minute_of_day(self.datetime)
 
     @property
     def is_workday(self) -> bool:
@@ -497,13 +503,20 @@ class Chargax(jym.Environment[TState]):
         # Get future prices
         timesteps_per_hour = 60 // self.minutes_per_timestep
         hour_offsets = jnp.arange(self.price_hour_lookahead) * timesteps_per_hour
-        future_timesteps = state.timestep + hour_offsets
+
+        def _future_state(offset):
+            return state._replace(
+                timestep=state.timestep + offset,
+                datetime=state.datetime
+                + jdt.Timedelta(seconds=offset * self.minutes_per_timestep * 60),
+            )
+
         future_prices = jax.vmap(
-            lambda t: self.get_grid_buy_price(state._replace(timestep=t))
-        )(future_timesteps)
+            lambda offset: self.get_grid_buy_price(_future_state(offset))
+        )(hour_offsets)
         future_sell_prices = jax.vmap(
-            lambda t: self.get_grid_sell_price(state._replace(timestep=t))
-        )(future_timesteps)
+            lambda offset: self.get_grid_sell_price(_future_state(offset))
+        )(hour_offsets)
 
         # Calculate price differences for all lookahead periods
         price_diffs_buy = future_prices[1:] - future_prices[0]  # all diffs from now
