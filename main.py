@@ -30,8 +30,8 @@ if __name__ == "__main__":
         normalize_rewards=False,
         normalize_observations=True,  # Important
     )
-
-    agent, metrics = trainer.train(rng, env)
+    train_fn = jym.precompile(trainer.train, rng, env)
+    agent, metrics = train_fn()
 
     results = agent.evaluate(rng, env, num_eval_episodes=25)
     print(f"PPO - Average reward over 25 evaluation episodes: {np.mean(results)}")

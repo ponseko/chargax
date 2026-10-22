@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Literal
+from typing import Any, Literal
 
 import equinox as eqx
 import jax
@@ -12,7 +12,7 @@ from chargax._station_layout import StationBattery
 
 
 class ChargaxBaselineAgent(eqx.Module):
-    def __init__(self, env: Chargax):
+    def __init__(self, env: Chargax[Any]):
         self.env = env
 
     def _run_episode(self, key: PRNGKeyArray, **kwargs) -> tuple[Array, Array]:
@@ -121,12 +121,12 @@ class MaxCharge(ChargaxBaselineAgent):
     """A rule-based baseline that always selects the maximum charge level
     for EVSEs and uses a schedule for station batteries."""
 
-    env: Chargax
+    env: Chargax[Any]
     battery_schedule: SimpleBatterySchedule | None
 
     def __init__(
         self,
-        env: Chargax,
+        env: Chargax[Any],
         battery_schedule: Literal["simple", "none"] = "simple",
     ):
         self.env = env
@@ -159,9 +159,10 @@ class MaxCharge(ChargaxBaselineAgent):
             lambda x: jnp.full_like(x, MAX_ACTION_EVSES), action["evses"]
         )
 
-        if self.battery_schedule is not None:
+        battery_schedule = kwargs.get("battery_schedule", self.battery_schedule)
+        if battery_schedule is not None:
             env_state = kwargs.get("env_state")
-            battery_action, new_schedule = self.battery_schedule(env_state)
+            battery_action, new_schedule = battery_schedule(env_state)
             battery_action = [jnp.asarray(x) for x in battery_action]
             action["batteries"] = jax.tree.map(
                 lambda x, y: jnp.full_like(x, y), action["batteries"], battery_action
@@ -176,12 +177,15 @@ class MaxCharge(ChargaxBaselineAgent):
 
     def _run_episode(self, key: PRNGKeyArray, **kwargs) -> tuple[Array, Array]:
         def _scan_step_fn(carry, _):
-            seed, state, obs, _schedule = carry
+            seed, state, obs, schedule = carry
             this_step_key, next_key = jax.random.split(seed)
 
             env_state = getattr(state, "env_state", state)
             action, new_schedule = self.get_action(
-                this_step_key, env_state=env_state, observation=obs
+                this_step_key,
+                env_state=env_state,
+                observation=obs,
+                battery_schedule=schedule,
             )
             timestep, new_state = self.env.step(this_step_key, state, action)
             obs, reward, *_ = timestep
@@ -205,7 +209,7 @@ class MaxCharge(ChargaxBaselineAgent):
 class Random(ChargaxBaselineAgent):
     """A rule-based baseline that selects a random charge level."""
 
-    env: Chargax
+    env: Chargax[Any]
     state: None = None  # Placeholder for compatibility
 
     def get_action(self, key: PRNGKeyArray, **kwargs) -> float:

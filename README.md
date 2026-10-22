@@ -124,7 +124,7 @@ For full control, replace any of the data-generating functions directly. Each ca
 ```python
 def my_buy_price(state):
     """Time-of-use pricing: expensive during the day, cheap at night."""
-    hour = (state.timestep * env.minutes_per_timestep) / 60.0
+    hour = state.minute_of_day / 60.0
     return jnp.where((hour >= 8) & (hour < 20), 0.30, 0.10)
 
 def my_sell_price(state):

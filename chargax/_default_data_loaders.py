@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from collections.abc import Callable
 from importlib import resources as r
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import jax
 import jax.numpy as jnp
@@ -18,15 +18,14 @@ DATA_FOLDER = "data"
 
 def _average_data(data, length):
     """
-    Average over data to a desired length
-    i.e. array([0, 5, 10]) -> array([0, 2.5, 2.5, 5, 5]) if length = 5
+    Redistribute amounts per bin over `length` equally sized bins spanning the same period,
+    preserving the total, i.e. array([0, 5, 10]) -> array([0, 0, 2.5, 2.5, 5, 5]) if length = 6
     """
-    x = np.array(data)
-    old_length = len(x)
-    x = np.repeat(x, length // x.shape[0]).reshape(old_length, -1)
-    x = x / x.shape[1]
-    x = x.flatten()
-    return np.array(x)
+    x = np.asarray(data, dtype=float)
+    old_edges = np.linspace(0, 1, len(x) + 1)
+    new_edges = np.linspace(0, 1, length + 1)
+    cumulative = np.concatenate([[0.0], np.cumsum(x)])
+    return np.diff(np.interp(new_edges, old_edges, cumulative))
 
 
 def _interpolate_data_linear(data, length):
@@ -34,17 +33,6 @@ def _interpolate_data_linear(data, length):
     x = np.linspace(0, len(data) - 1, num=len(data))
     x_new = np.linspace(0, len(data) - 1, num=length)
     return np.interp(x_new, x, data)
-
-
-def _interpolate_data_stepwise(data, length):
-    """
-    Interpolates data to a desired length using stepwise interpolation
-    new values are set to the previous value
-    """
-    x = np.array(data)
-    x = np.repeat(x, length // x.shape[1], axis=1)
-    assert x.shape[1] == length and x.shape[0] == len(data)
-    return x
 
 
 def _load_scenario_csvs(dataset: str, average_cars_per_day, minutes_per_timestep):
@@ -107,7 +95,7 @@ def _load_car_profiles(dataset: Literal["eu", "us", "world"]):
 
 
 def build_default_scenario(
-    env: Chargax,
+    env: Chargax[Any],
     car_profile: Literal["eu", "us", "world"] = "eu",
     user_profile: Literal[
         "highway", "residential", "workplace", "shopping"
@@ -153,11 +141,14 @@ def build_default_scenario(
     weekend_data = _pre_sample_poisson(k_we, arrival_data_weekends)
     stacked_data = (weekday_data, weekend_data)
 
+    minutes_per_timestep = env.minutes_per_timestep
+
     def _sample_arrivals(key, state):
+        step_of_day = state.minute_of_day // minutes_per_timestep
         arrival_means = jax.lax.select(
             state.is_workday,
-            stacked_data[0][:, state.timestep],
-            stacked_data[1][:, state.timestep],
+            stacked_data[0][:, step_of_day],
+            stacked_data[1][:, step_of_day],
         )
         randint = jax.random.randint(key, (), 0, arrival_means.shape[0])
         return arrival_means[randint]
@@ -228,7 +219,7 @@ def build_default_scenario(
 
 
 def build_default_grid_price_fn(
-    env: Chargax, dataset: str = "2023_NL", offset: float = 0
+    env: Chargax[Any], dataset: str = "2023_NL", offset: float = 0
 ) -> Callable[[EnvState], float]:
     """Default function to get the electricity prices based on the dataset"""
 
@@ -237,10 +228,14 @@ def build_default_grid_price_fn(
     with open(csv_file, "r") as f:
         reader = csv.reader(f)
         data = [list(map(float, row[1:])) for row in list(reader)[1:]]
-    desired_length = 24 * 60 // env.minutes_per_timestep
-    data = jnp.array(_interpolate_data_stepwise(data, desired_length))
+    hourly_prices = jnp.array(data).flatten()
 
-    return lambda state: data[state.day_of_year][state.timestep] + offset
+    def _grid_price(state):
+        # day_of_year is 1-based; after the last day of the dataset, wrap around to its first day
+        index = (state.day_of_year - 1) * 24 + state.minute_of_day // 60
+        return hourly_prices[index % hourly_prices.shape[0]] + offset
+
+    return _grid_price
 
 
 def build_leave_cars_fn() -> Callable[[PRNGKeyArray, EVSE], Array]:
