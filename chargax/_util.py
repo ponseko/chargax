@@ -19,3 +19,14 @@ def year_and_doy(dt: jdt.Datetime):
     year = 2020 + cycle * 4 + year_offset
 
     return year, doy
+
+
+def weekday(dt: jdt.Datetime):
+    """0-6 for Monday-Sunday."""
+    days = (dt - jdt.to_datetime("2020-01-01")).days
+    return (days + 2) % 7  # 2020-01-01 was a Wednesday
+
+
+def minute_of_day(dt: jdt.Datetime):
+    """Minutes since midnight (0-1439)."""
+    return (dt - jdt.to_datetime("2020-01-01")).seconds // 60
